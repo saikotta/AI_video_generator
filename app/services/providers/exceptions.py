@@ -35,6 +35,16 @@ class NoSuitableMediaFoundError(StockMediaError):
     """Raised when no media item meeting selection criteria is found for keywords."""
     pass
 
+class UncertainFootageRequiresApprovalError(StockMediaError):
+    """
+    Raised when candidate stock video footage is visually uncertain and requires explicit
+    manual reviewer approval before it can proceed to final video assembly.
+    Never silently sent to final assembly.
+    """
+    def __init__(self, message: str, pending_approvals: list = None):
+        super().__init__(message)
+        self.pending_approvals = pending_approvals or []
+
 # TTS Provider Exceptions
 class TTSError(Exception):
     """Base exception for text-to-speech provider errors."""

@@ -2,6 +2,7 @@ import re
 import json
 import random
 import asyncio
+import logging
 import httpx
 from typing import Optional
 from pydantic import ValidationError
@@ -17,6 +18,8 @@ from app.services.providers.exceptions import (
     ScriptProviderError
 )
 
+logger = logging.getLogger(__name__)
+
 class GroqScriptProvider(ScriptProvider):
     def __init__(
         self,
@@ -29,7 +32,15 @@ class GroqScriptProvider(ScriptProvider):
     ):
         self.api_key = api_key or settings.GROQ_API_KEY
         self.model = model or settings.GROQ_MODEL
-        self.words_per_minute = words_per_minute or settings.NARRATION_WPM
+        # Calibrated narration speed: 130 WPM calibrated to EdgeTTS (en-US-ChristopherNeural)
+        if words_per_minute is not None:
+            self.words_per_minute = words_per_minute
+        elif hasattr(settings, "CALIBRATED_NARRATION_WPM") and settings.CALIBRATED_NARRATION_WPM:
+            self.words_per_minute = settings.CALIBRATED_NARRATION_WPM
+        elif hasattr(settings, "NARRATION_WPM") and settings.NARRATION_WPM and settings.NARRATION_WPM != 150:
+            self.words_per_minute = settings.NARRATION_WPM
+        else:
+            self.words_per_minute = 130
         self.max_retries = max_retries or settings.GROQ_MAX_RETRIES
         self.base_delay = base_delay or settings.GROQ_RETRY_BASE_DELAY
         self.timeout_seconds = timeout_seconds
@@ -39,6 +50,11 @@ class GroqScriptProvider(ScriptProvider):
         self.last_expansion_occurred = False
         self.last_trimming_occurred = False
         self.last_retry_count = 0
+        self.last_shot_plan_fallback_occurred = False
+        self.last_shot_plan_error: Optional[str] = None
+        self.fallback_to_single_shot: bool = True
+        self.last_json_recovery_attempted: bool = False
+        self.last_json_recovery_failed: bool = False
 
     async def __aenter__(self):
         self._internal_client = httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_seconds))
@@ -55,7 +71,7 @@ class GroqScriptProvider(ScriptProvider):
         return self._internal_client
 
     def calculate_target_words(self, duration_seconds: int) -> int:
-        return int(duration_seconds * self.words_per_minute / 60)
+        return int(round(duration_seconds * self.words_per_minute / 60.0))
 
     def clean_script_text(self, text: str) -> str:
         text = re.sub(r'\[.*?\]', '', text)
@@ -66,6 +82,11 @@ class GroqScriptProvider(ScriptProvider):
         text = re.sub(r'^\s*[*•-]\s*', '', text, flags=re.MULTILINE)
         text = text.replace('—', ' - ').replace('–', ' - ').replace('’', "'").replace('“', '"').replace('”', '"')
         text = re.sub(r'^(Here is|Here\'s|Sure, here is|Below is)[^:\n]*:\s*', '', text, flags=re.IGNORECASE)
+        # Clean any malformed double punctuation like ",.", ";.", ":.", "—.", or "-."
+        # When a clause delimiter is followed by [.!?] and a lowercase word, preserve the clause delimiter.
+        text = re.sub(r'([,;:—–-])\s*[.!?]+\s+(?=[a-z])', r'\1 ', text)
+        text = re.sub(r'[,;:—–-]+\s*([.!?])', r'\1', text)
+        text = re.sub(r'\s+([.!?])', r'\1', text)
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         cleaned = " ".join(lines)
         return cleaned.strip()
@@ -112,11 +133,32 @@ class GroqScriptProvider(ScriptProvider):
 
         return data
 
-    async def _post_groq(self, prompt: str, is_json: bool = False, temperature: float = 0.7) -> str:
+    async def _post_groq(
+        self,
+        prompt: str,
+        is_json: bool = False,
+        temperature: float = 0.7,
+        operation: Optional[str] = None
+    ) -> str:
         if not self.api_key:
             raise ScriptProviderError(
                 "GROQ_API_KEY environment variable is not set. Cannot invoke Groq API."
             )
+
+        if operation:
+            op_name = operation
+        elif is_json:
+            if '"scenes"' in prompt:
+                op_name = "split_into_scenes"
+            elif '"visual_prompt"' in prompt:
+                op_name = "generate_visual_specification"
+            else:
+                op_name = "json_completion"
+        else:
+            op_name = "script_generation"
+
+        self.last_json_recovery_attempted = False
+        self.last_json_recovery_failed = False
 
         client = self._get_client()
         headers = {
@@ -139,13 +181,15 @@ class GroqScriptProvider(ScriptProvider):
             except httpx.TimeoutException as e:
                 if attempt == self.max_retries - 1:
                     raise ScriptGenerationTimeoutError(
-                        f"Groq request timed out after {self.timeout_seconds} seconds."
+                        f"Groq request timed out after {self.timeout_seconds} seconds ({op_name})."
                     ) from e
                 await asyncio.sleep(self.base_delay * (2 ** attempt))
                 continue
             except httpx.HTTPError as e:
                 if attempt == self.max_retries - 1:
-                    raise ScriptProviderError(f"HTTP connection error connecting to Groq API.") from e
+                    raise ScriptProviderError(
+                        f"HTTP connection error connecting to Groq API ({op_name})."
+                    ) from e
                 await asyncio.sleep(self.base_delay * (2 ** attempt))
                 continue
 
@@ -154,7 +198,9 @@ class GroqScriptProvider(ScriptProvider):
                 try:
                     return data["choices"][0]["message"]["content"]
                 except (KeyError, IndexError) as e:
-                    raise InvalidScriptResponseError("Groq response payload missing choices array.") from e
+                    raise InvalidScriptResponseError(
+                        f"Groq response payload missing choices array ({op_name})."
+                    ) from e
 
             elif response.status_code == 429:
                 self.last_retry_count += 1
@@ -169,22 +215,129 @@ class GroqScriptProvider(ScriptProvider):
 
                 if attempt == self.max_retries - 1:
                     raise ScriptProviderError(
-                        f"Groq API rate limit exceeded after {self.max_retries} attempts (HTTP 429)."
+                        f"Groq API rate limit exceeded after {self.max_retries} attempts (HTTP 429, {op_name})."
                     )
                 await asyncio.sleep(delay)
 
             else:
+                # Extract structured error details if present
+                error_code = None
+                try:
+                    err_json = response.json()
+                    if isinstance(err_json, dict) and "error" in err_json:
+                        err_obj = err_json["error"]
+                        if isinstance(err_obj, dict):
+                            error_code = err_obj.get("code")
+                except Exception:
+                    pass
+
+                # Targeted recovery only when:
+                # 1. The request explicitly used JSON response mode.
+                # 2. Groq returned HTTP 400.
+                # 3. The structured provider error code is json_validate_failed.
+                if is_json and response.status_code == 400 and error_code == "json_validate_failed":
+                    logger.warning(
+                        "Groq returned HTTP 400 with code '%s' for %s. Attempting targeted single-shot recovery without response_format.",
+                        error_code,
+                        op_name
+                    )
+                    self.last_json_recovery_attempted = True
+
+                    recovery_payload = {
+                        "model": self.model,
+                        "messages": [
+                            {"role": "user", "content": prompt}
+                        ],
+                        "temperature": temperature
+                    }
+
+                    try:
+                        recovery_resp = await client.post(self.base_url, json=recovery_payload, headers=headers)
+                    except httpx.TimeoutException as te:
+                        self.last_json_recovery_failed = True
+                        raise ScriptGenerationTimeoutError(
+                            f"Groq request timed out during JSON recovery ({op_name}) after {self.timeout_seconds} seconds."
+                        ) from te
+                    except httpx.HTTPError as he:
+                        self.last_json_recovery_failed = True
+                        raise ScriptProviderError(
+                            f"HTTP connection error during Groq JSON recovery ({op_name})."
+                        ) from he
+
+                    if recovery_resp.status_code == 200:
+                        try:
+                            rec_data = recovery_resp.json()
+                            content = rec_data["choices"][0]["message"]["content"]
+                            self.last_json_recovery_failed = False
+                            return content
+                        except (KeyError, IndexError) as e:
+                            self.last_json_recovery_failed = True
+                            raise InvalidScriptResponseError(
+                                f"Groq recovery response payload missing choices array ({op_name})."
+                            ) from e
+                    else:
+                        self.last_json_recovery_failed = True
+                        rec_err_code = None
+                        try:
+                            rec_err_json = recovery_resp.json()
+                            if isinstance(rec_err_json, dict) and "error" in rec_err_json:
+                                rec_err_code = rec_err_json["error"].get("code")
+                        except Exception:
+                            pass
+                        err_detail = f", code: '{rec_err_code}'" if rec_err_code else ""
+                        raise ScriptProviderError(
+                            f"Groq API returned HTTP error status {recovery_resp.status_code}{err_detail} "
+                            f"(operation: '{op_name}', json_recovery_attempted: True, fallback_failed: True)."
+                        )
+
+                # Unrecovered or unrelated HTTP error
+                err_detail = f", code: '{error_code}'" if error_code else ""
                 raise ScriptProviderError(
-                    f"Groq API returned HTTP error status {response.status_code}."
+                    f"Groq API returned HTTP error status {response.status_code}{err_detail} "
+                    f"(operation: '{op_name}', json_recovery_attempted: False)."
                 )
 
-        raise ScriptProviderError(f"Groq API request retries exhausted after {self.max_retries} attempts.")
+        raise ScriptProviderError(
+            f"Groq API request retries exhausted after {self.max_retries} attempts ({op_name})."
+        )
+
+    DANGLING_END_WORDS = {
+        "a", "an", "the",
+        "and", "or", "but", "nor", "so", "yet",
+        "while", "as", "because", "if", "when", "although", "since", "though", "whereas",
+        "that", "which", "who", "whom", "whose", "where",
+        "with", "of", "to", "in", "on", "at", "by", "for", "from", "into", "through",
+        "during", "before", "after", "above", "below", "between", "under", "over",
+        "about", "against", "among", "toward", "towards", "upon",
+        "then", "also"
+    }
+
+    @classmethod
+    def _clean_dangling_ending(cls, text: str) -> str:
+        words = text.split()
+        while len(words) > 3:
+            clean_word = re.sub(r'^[^\w]+|[^\w]+$', '', words[-1]).lower()
+            if not clean_word or clean_word in cls.DANGLING_END_WORDS or words[-1] in {',', ';', ':', '-', '—', '–'}:
+                words.pop()
+            else:
+                break
+        result = " ".join(words)
+        result = re.sub(r'[,;:—–\s-]+$', '', result)
+        return result
 
     def trim_to_sentence_boundary(self, text: str, target_words: int) -> tuple[str, bool]:
         words = text.split()
         current_word_count = len(words)
-        max_words = int(target_words * 1.15)
-        min_words = int(target_words * 0.90)
+
+        # Calibrate slack based on duration:
+        # Short-form videos (target_words <= 65, representing <= 30 seconds) use conservative ~105% upper bound
+        # Longer videos (target_words > 65) preserve 115% slack.
+        if target_words <= 65:
+            max_words = max(target_words + 1, int(round(target_words * 1.05)))
+            min_words = int(round(target_words * 0.90))
+        else:
+            max_words = int(target_words * 1.15)
+            min_words = int(target_words * 0.90)
 
         if current_word_count <= max_words:
             return text, False
@@ -192,7 +345,11 @@ class GroqScriptProvider(ScriptProvider):
         sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
         if not sentences:
             trimmed_text = " ".join(words[:max_words]).strip()
-            if not trimmed_text.endswith(('.', '!', '?')):
+            trimmed_text = self._clean_dangling_ending(trimmed_text)
+            trimmed_text = re.sub(r'[,;:—–-]+\s*([.!?])', r'\1', trimmed_text)
+            trimmed_text = re.sub(r'[,;:—–\s-]+$', '', trimmed_text)
+            trimmed_text = re.sub(r'\s+([.!?])', r'\1', trimmed_text)
+            if trimmed_text and not trimmed_text.endswith(('.', '!', '?')):
                 trimmed_text += '.'
             return trimmed_text, True
 
@@ -210,7 +367,7 @@ class GroqScriptProvider(ScriptProvider):
                 if accumulated_words >= min_words:
                     break
                 else:
-                    clauses = [c.strip() for c in re.split(r'(?<=[,;:—–])\s+', sentence) if c.strip()]
+                    clauses = [c.strip() for c in re.split(r'(?<=[,;:—–])\s+|(?<=\s[-—–])\s+', sentence) if c.strip()]
                     added_clause = False
                     for clause in clauses:
                         clause_words = len(clause.split())
@@ -226,15 +383,26 @@ class GroqScriptProvider(ScriptProvider):
                             break
 
                     if not added_clause and accumulated_words < min_words:
-                        rem = max_words - accumulated_words
-                        clause_words_list = sentence.split()[:rem]
-                        if clause_words_list:
-                            trimmed_sentences.append(" ".join(clause_words_list))
-                            accumulated_words += len(clause_words_list)
+                        if accumulated_words == 0:
+                            rem = max_words - accumulated_words
+                            clause_words_list = sentence.split()[:rem]
+                            if clause_words_list:
+                                partial = " ".join(clause_words_list)
+                                partial = self._clean_dangling_ending(partial)
+                                if partial:
+                                    trimmed_sentences.append(partial)
+                                    accumulated_words += len(partial.split())
+                        else:
+                            # Preserve complete grammatical sentences; do not chop words mid-sentence merely to satisfy word limit
+                            pass
                     break
 
         trimmed_text = " ".join(trimmed_sentences).strip()
-        if trimmed_text and not trimmed_text[-1] in '.!?':
+        trimmed_text = self._clean_dangling_ending(trimmed_text)
+        trimmed_text = re.sub(r'[,;:—–-]+\s*([.!?])', r'\1', trimmed_text)
+        trimmed_text = re.sub(r'[,;:—–\s-]+$', '', trimmed_text)
+        trimmed_text = re.sub(r'\s+([.!?])', r'\1', trimmed_text)
+        if trimmed_text and not trimmed_text.endswith(('.', '!', '?')):
             trimmed_text += '.'
 
         return trimmed_text, True
@@ -265,18 +433,154 @@ class GroqScriptProvider(ScriptProvider):
 
         return scenes
 
+    @classmethod
+    def _classify_topic(cls, topic: str) -> str:
+        t_lower = topic.lower()
+
+        # 1. Historical topics (explicitly requesting history, origins, eras, civilizations)
+        history_keywords = [
+            "history", "historical", "ancient", "origin of", "origins of",
+            "empire", "dynasty", "century", "civilization", "revolution",
+            "medieval", "renaissance", "war of", "world war", "battle of",
+            "antiquity", "archaeology", "historical origins"
+        ]
+        if any(re.search(r'\b' + re.escape(kw) + r'\b', t_lower) for kw in history_keywords):
+            return "history"
+
+        # 2. Scientific & educational processes (natural phenomena, biology, physics, astronomy, geology)
+        science_keywords = [
+            "seed", "seeds", "germinat", "plant", "plants", "photosynthesis",
+            "biology", "biological", "physics", "physical process", "chemistry",
+            "chemical", "water cycle", "gravity", "ecosystem", "cellular",
+            "cell division", "organism", "metamorphosis", "geology", "volcano",
+            "astronomy", "planet", "solar system", "glacier", "evolution",
+            "anatomy", "pollination", "scientific"
+        ]
+        if any(re.search(r'\b' + re.escape(kw) + r'\b', t_lower) for kw in science_keywords):
+            return "science"
+
+        # 3. Cooking & culinary topics (recipes, ingredients, food preparation techniques)
+        cooking_keywords = [
+            "cook", "cooking", "bake", "baking", "recipe", "recipes", "kitchen",
+            "culinary", "ingredient", "ingredients", "brew", "brewing", "roast",
+            "roasting", "food", "dish", "dishes", "pasta", "bread", "soup",
+            "steak", "sushi", "espresso", "coffee", "tea", "sear", "sauté", "knead",
+            "fry", "frying", "stir-fry", "stir fry", "vegetable", "vegetables", "wok", "skillet"
+        ]
+        if any(re.search(r'\b' + re.escape(kw) + r'\b', t_lower) for kw in cooking_keywords):
+            return "cooking"
+
+        # 4. Technology & engineering topics (computing, mechanics, electronics, systems, manufacturing)
+        tech_keywords = [
+            "technology", "tech", "computer", "computers", "computing", "software", "hardware",
+            "algorithm", "artificial intelligence", "ai", "machine learning",
+            "robot", "robotics", "robotic", "automated", "automation", "manufacturing",
+            "weld", "welding", "automotive", "assembly", "factory", "machinery",
+            "engine", "internet", "coding", "programming",
+            "microchip", "microchips", "semiconductor", "processor", "processors",
+            "microprocessor", "microprocessors", "network", "blockchain",
+            "quantum computing", "electric vehicle", "aerospace", "satellite"
+        ]
+        if any(re.search(r'\b' + re.escape(kw) + r'\b', t_lower) for kw in tech_keywords):
+            return "technology"
+
+        # 5. Creative storytelling / narrative fiction
+        story_keywords = [
+            "story", "stories", "tale", "tales", "fable", "fables", "adventure",
+            "adventures", "legend", "legends", "myth", "myths", "narrative",
+            "fiction", "chronicle"
+        ]
+        if any(re.search(r'\b' + re.escape(kw) + r'\b', t_lower) for kw in story_keywords):
+            return "story"
+
+        # Process-oriented phrases ("how a ... works / happens / develops")
+        if re.search(r'\bhow\s+(?:a|an|the|do|does|it)\b', t_lower):
+            return "science"
+
+        return "general"
+
+    @classmethod
+    def _build_topic_content_instructions(cls, topic: str) -> str:
+        category = cls._classify_topic(topic)
+
+        if category == "science":
+            return (
+                "- For this scientific and educational process topic, explain the actual physical and biological process directly and sequentially from the very first sentence.\n"
+                "- Immediately discuss observable physical mechanisms, sequential developmental stages, cause-and-effect transformations, and natural outcomes.\n"
+                "- For biological growth or lifecycle topics, directly describe the sequential physical progression (e.g. hydration, germination, structural development, root anchoring, and shoot emergence).\n"
+                "- STRICTLY FORBIDDEN: Do NOT introduce ancient farmers, cultural ceremonies, historical origins, or invented backstories. Focus purely on the physical and biological process itself."
+            )
+        elif category == "cooking":
+            return (
+                "- For this culinary topic, focus directly on the actual cooking and preparation steps, ingredients, physical techniques, and sensory transformations (e.g. kneading, searing, textures, heat, aromas).\n"
+                "- Walk through the preparation method in a clear, engaging sequence without detouring into ancient origins, historical anecdotes, or cultural backstories unless explicitly requested."
+            )
+        elif category == "technology":
+            return (
+                "- For this technology and engineering topic, explain the actual operational mechanisms, system components, engineering principles, and physical functionality directly.\n"
+                "- Focus on how the components work together and the practical operation without irrelevant historical preamble."
+            )
+        elif category == "history":
+            return (
+                "- For this historical topic, provide an authentic, engaging historical narrative focusing on chronological context, key developments, pivotal figures or moments, and their lasting significance.\n"
+                "- Ground the narration in concrete historical facts and storytelling without generic filler."
+            )
+        elif category == "story":
+            return (
+                "- For this storytelling topic, deliver an engaging, creative narrative with a compelling arc, vivid imagery, character journey, and evocative dramatic flow.\n"
+                "- Maintain a natural spoken storytelling rhythm without academic lecturing or dry explanations."
+            )
+        else:
+            return (
+                "- Focus directly on the core subject matter requested, explaining key concepts, observable details, and engaging insights from the very first sentence.\n"
+                "- Avoid forcing rigid historical origins, ancient backstories, or cultural digressions unless the topic explicitly requests history."
+            )
+
+    @classmethod
+    def _build_expansion_instructions(cls, topic: str, words_needed: int) -> str:
+        category = cls._classify_topic(topic)
+        if category == "science":
+            focus = "explaining the next sequential physical stages, detailed biological/physical mechanisms, and observable natural transformations (strictly avoiding historical anecdotes or ancient backstories)"
+        elif category == "cooking":
+            focus = "describing the subsequent culinary preparation steps, cooking techniques, sensory observations, and texture or flavor developments (avoiding historical detours)"
+        elif category == "technology":
+            focus = "elaborating on technical mechanisms, component interactions, engineering principles, and practical operational details"
+        elif category == "history":
+            focus = "adding deeper historical context, chronological developments, pivotal events, and narrative continuity"
+        elif category == "story":
+            focus = "deepening the creative narrative arc, character journey, sensory details, and atmospheric storytelling"
+        else:
+            focus = "providing concrete details, specific observable examples, and seamless narrative continuation"
+
+        return (
+            f"1. Write a seamless continuation by {focus} to reach an additional {words_needed} words.\n"
+            f"2. DO NOT repeat the current script.\n"
+            f"3. Return ONLY spoken narration text without Markdown, headings, bullet points, or stage directions."
+        )
+
     async def generate_script(self, topic: str, desired_duration_seconds: int) -> str:
         self.last_expansion_occurred = False
         self.last_trimming_occurred = False
         target_words = self.calculate_target_words(desired_duration_seconds)
+        content_instructions = self._build_topic_content_instructions(topic)
+
+        # Calibrate slack based on duration:
+        # For short-form videos (<= 30s), tighten upper bound slack to ~105% (e.g. 45 words for 43 target)
+        # For longer videos (> 30s), preserve 115% slack.
+        if desired_duration_seconds <= 30:
+            max_target_words = max(target_words + 1, int(round(target_words * 1.05)))
+            min_target_words = int(round(target_words * 0.90))
+        else:
+            max_target_words = int(target_words * 1.15)
+            min_target_words = int(target_words * 0.90)
 
         prompt = (
             f"You are a master documentary scriptwriter crafting a rich, immersive spoken narration.\n"
             f"Write a full narration script for a video about: \"{topic}\".\n\n"
             f"TARGET DURATION: {desired_duration_seconds} seconds.\n"
-            f"TARGET LENGTH: AT LEAST {target_words} WORDS (approx. {target_words} to {int(target_words * 1.15)} words).\n\n"
+            f"TARGET LENGTH: AT LEAST {target_words} WORDS (approx. {target_words} to {max_target_words} words).\n\n"
             f"CONTENT INSTRUCTIONS:\n"
-            f"- Provide a comprehensive, detailed story covering origins, key historical moments, cultural significance, anecdotes, major developments, and a strong conclusion.\n"
+            f"{content_instructions}\n"
             f"- It is CRITICAL that the text is detailed and lengthy enough to reach the target word count of AT LEAST {target_words} words.\n\n"
             f"STRICT FORMATTING RULES:\n"
             f"1. Return ONLY the spoken narration text. Do not include intro/outro conversational remarks.\n"
@@ -295,17 +599,15 @@ class GroqScriptProvider(ScriptProvider):
             raise InvalidScriptResponseError("Groq returned an empty script response.")
 
         word_count = len(cleaned_text.split())
-        min_target_words = int(target_words * 0.90)
 
         if word_count < min_target_words:
             words_needed = target_words - word_count
+            expansion_instructions = self._build_expansion_instructions(topic, words_needed)
             expansion_prompt = (
                 f"The following video narration script on \"{topic}\" is currently {word_count} words long, but needs to be expanded by approximately {words_needed} more words to reach the target length of {target_words} words.\n\n"
                 f"Current Script:\n\"{cleaned_text}\"\n\n"
                 f"EXPANSION INSTRUCTIONS:\n"
-                f"1. Write a seamless continuation adding more historical context, specific examples, fascinating details, and deeper narrative flow to reach an additional {words_needed} words.\n"
-                f"2. DO NOT repeat the current script.\n"
-                f"3. Return ONLY spoken narration text without Markdown, headings, bullet points, or stage directions.\n\n"
+                f"{expansion_instructions}\n\n"
                 f"Continuation Spoken Narration:"
             )
             raw_expansion = await self._post_groq(expansion_prompt, is_json=False, temperature=0.7)
@@ -315,7 +617,6 @@ class GroqScriptProvider(ScriptProvider):
                 word_count = len(cleaned_text.split())
                 self.last_expansion_occurred = True
 
-        max_target_words = int(target_words * 1.15)
         if word_count > max_target_words:
             trimmed_text, did_trim = self.trim_to_sentence_boundary(cleaned_text, target_words)
             if did_trim:
@@ -339,18 +640,21 @@ class GroqScriptProvider(ScriptProvider):
         if not script or not script.strip():
             raise InvalidScriptResponseError("Cannot split an empty narration script into scenes.")
 
-        target_scenes = max(3, round(desired_duration_seconds / 11.5))
+        # Target roughly 3 to 5 seconds per visual beat (approx. 8 to 14 words per beat)
+        # For a 15-second narration, this aims for approximately 3 to 4 visual beats
+        target_scenes = max(3, round(desired_duration_seconds / 4.2))
         prompt = (
-            f"You are a master documentary video director.\n"
-            f"Partition the following full narration script into sequential scene beats for a {desired_duration_seconds}-second video.\n\n"
+            f"You are a master cinematic documentary director and visual editor.\n"
+            f"Partition the following narration script into sequential, action-focused visual scene beats for a {desired_duration_seconds}-second video.\n\n"
             f"FULL SCRIPT NARRATION:\n\"\"\"\n{script.strip()}\n\"\"\"\n\n"
             f"PARTITIONING RULES:\n"
-            f"1. You MUST partition the script into sequential scene beats. Every sentence from the script MUST appear in one of the scenes.\n"
-            f"2. DO NOT omit, summarize, truncate, or rewrite any sentences from the script.\n"
-            f"3. Target roughly 8 to 15 seconds of narration per scene (approx. 20-35 words per scene beat).\n"
-            f"4. Aim for roughly {target_scenes} scenes naturally following the narrative flow of the script.\n"
-            f"5. 'scene_order' MUST start at 1 and increment sequentially (1, 2, 3, ..., N).\n"
-            f"6. Each 'scene_text' must contain the verbatim narration sentences for that beat.\n\n"
+            f"1. Target approximately 3 to 5 seconds of narration per visual beat (approx. 8 to 14 words per beat). Aim for roughly {target_scenes} visual beats for this {desired_duration_seconds}-second video when the narrative content supports them.\n"
+            f"2. Each scene beat must depict one clearly identifiable, concrete visual action.\n"
+            f"3. You MUST preserve the narration's exact original words and sequential order verbatim. DO NOT summarize, omit, rephrase, or invent any words.\n"
+            f"4. You MAY split long compound or complex sentences across consecutive scene beats at natural clause or phrase boundaries (such as commas, semicolons, or conjunctions like 'while', 'as', 'and').\n"
+            f"5. DO NOT split mid-phrase or separate individual words unnaturally; ensure every scene beat forms a meaningful, coherent spoken segment.\n"
+            f"6. 'scene_order' MUST start at 1 and increment sequentially (1, 2, 3, ..., N).\n"
+            f"7. Every word of the original narration must be accounted for across the sequential 'scene_text' values without duplication or omission.\n\n"
             f"CRITICAL FORMATTING REQUIREMENT:\n"
             f"Do NOT write any introductory remarks, notes, or explanations before or after the JSON. Return ONLY a valid JSON object starting with '{{' and ending with '}}' matching this exact structure:\n"
             f"{{\n"
@@ -381,18 +685,142 @@ class GroqScriptProvider(ScriptProvider):
         if not scene_text or not scene_text.strip():
             raise InvalidScriptResponseError("Cannot generate visual specification for empty scene text.")
 
+        word_count = len(scene_text.split())
+        est_duration = round(max(3.0, word_count * 60.0 / self.words_per_minute), 1)
+
         prompt = (
-            f"You are a visual cinematography director for a documentary video.\n"
-            f"Craft a concrete visual specification for the following spoken narration scene beat.\n\n"
-            f"SCENE NARRATION:\n\"{scene_text.strip()}\"\n\n"
+            f"You are a visual cinematography director for high-end documentary video production.\n"
+            f"Craft a concrete, action-focused visual specification for the following spoken narration scene beat.\n\n"
+            f"SCENE NARRATION:\n\"{scene_text.strip()}\"\n"
+            f"PROVISIONAL SCENE DURATION: approx. {est_duration} seconds.\n\n"
             f"INSTRUCTIONS:\n"
-            f"1. 'visual_prompt': Write a short, concrete visual description of observable subjects, people, actions, setting, lighting, and camera composition. NO abstract concepts or vague metaphors.\n"
-            f"2. 'search_keywords': Provide a list of 3 to 5 concrete search terms suitable for finding stock footage on video platforms like Pexels.\n\n"
+            f"1. 'visual_prompt': Describe a single, concrete, observable physical action happening right now on screen. Specify the exact primary subject, physical motion, camera angle/framing (e.g., extreme close-up, macro shot, low angle, aerial view), setting, and natural lighting. Focus strictly on visible physical actions. Do NOT use abstract concepts, metaphors, or broad thematic summaries.\n"
+            f"2. 'search_keywords': Provide a list of 3 to 5 highly specific stock video search phrases (2 to 4 words each) strictly tailored for video libraries like Pexels.\n"
+            f"   - Prioritize concrete subjects, visible physical motions, and camera perspectives (e.g., 'macro timelapse', 'close up', 'underground').\n"
+            f"   - Every keyword MUST directly depict the literal subject and action described in this narration beat.\n"
+            f"   - STRICTLY FORBIDDEN: Do NOT include broad thematic concepts, historical/cultural associations, human activities not mentioned in the beat, or generic meta-tags (e.g., FORBIDDEN: 'ancient farmers', 'agricultural history', 'cultural ceremony', 'nature documentary', 'cinematic landscape').\n"
+            f"   - Do NOT invent unrelated characters or events.\n"
+            f"3. 'action_timeline': Provide a chronological list of 1 to 2 specific action events for this beat.\n"
+            f"   Each action event must contain:\n"
+            f"   - 'action_description': clear physical action visible in the shot.\n"
+            f"   - 'visual_start_seconds': provisional start time relative to scene start (starting at 0.0).\n"
+            f"   - 'visual_end_seconds': provisional end time relative to scene start (e.g. 2.0 to 4.0).\n"
+            f"   - 'sound_type': choose 'action' (audible physical action like impact or pour), 'ambience' (continuous natural background like rain or wind), or 'none' (naturally silent actions).\n"
+            f"   - 'sfx_query': realistic sound description query (e.g. 'water droplets falling'), or null if sound_type is 'none'.\n"
+            f"   - 'sfx_start_seconds': offset when sound begins (or null if sound_type is 'none').\n"
+            f"   - 'sfx_duration_seconds': duration of sound effect in seconds (or null if sound_type is 'none').\n"
+            f"   - 'sfx_volume': relative volume between 0.1 and 1.0 (or null if sound_type is 'none').\n"
+            f"   SOUND REALISM RULES:\n"
+            f"   - Distinguish observable physical actions from audible acoustic events.\n"
+            f"   - Naturally silent actions (e.g., seeds resting in soil, roots pushing downward underground, cell division, leaves gently unfolding) DO NOT generate audible impacts! Set sound_type='none' and sfx_query=null for naturally silent biological growth.\n"
+            f"   - STRICTLY FORBIDDEN: Do NOT invent dramatic cracking, explosions, crunching, or fictional sci-fi sounds for silent biological processes.\n"
+            f"   - Use sound_type='ambience' only when an environmental background sound naturally accompanies the shot (e.g. soft rain falling, gentle wind rustle).\n"
+            f"4. 'shot_plan': For scenes containing multiple distinct physical actions, provide a sequential list of sub-scene camera shots (maximum 4 shots).\n"
+            f"   SHOT PLANNING RULES:\n"
+            f"   - SINGLE-ACTION SCENES: If the scene narration describes only one observable physical action or continuous state, set \"shot_plan\": null (or omit it). Do NOT split a single continuous action into redundant shots.\n"
+            f"   - MULTI-ACTION SCENES: If the narration contains two distinct sequential physical actions (e.g., \"Pour oil into the hot pan, then add sliced carrots\"), create 2 shots. If it contains three distinct observable actions and duration permits, create 3 shots.\n"
+            f"   - NEVER create extra shots solely to increase shot count.\n"
+            f"   - NEVER invent actions absent from the spoken narration or supported scene context.\n"
+            f"   - Preserve the original scene narration meaning and chronological sequence exactly.\n"
+            f"   - Prefer actions that can realistically be represented by stock footage (e.g. pouring oil, dropping sliced carrots, robotic welding, circuit board soldering, seed sprouting, water dripping).\n"
+            f"   - Maintain logical action order and continuity.\n\n"
+            f"   EACH SHOT IN 'shot_plan' MUST CONTAIN:\n"
+            f"   - 'shot_index': 1-indexed sequential integer starting at 1 (1, 2, 3, ...).\n"
+            f"   - 'required_visible_action': concrete observable physical action on screen (non-empty string).\n"
+            f"   - 'primary_subject': the main physical entity or object filmed (non-empty string).\n"
+            f"   - 'required_setting': specific environment or setting (non-empty string).\n"
+            f"   - 'visual_state': physical visual state (e.g. 'empty heating', 'sizzling', 'raw', 'clean', 'sprouting').\n"
+            f"   - 'camera_framing': camera perspective (e.g. 'close-up', 'macro close-up', 'extreme close-up', 'overhead', 'medium shot').\n"
+            f"   - 'search_keywords': list of 2 to 5 specific stock video search queries tailored for stock libraries (2 to 4 words each).\n"
+            f"   - 'required_objects': list of 1 to 4 concrete physical items that must be visible in this shot (e.g. ['pan', 'cooking oil stream']).\n"
+            f"   - 'explicit_exclusions': list of 2 to 5 contradictory items or settings that must NOT appear in this shot (e.g. ['meat', 'chicken', 'bathtub', 'raw fish']).\n"
+            f"   - 'provisional_start_seconds': non-negative float timestamp relative to scene start (starting at 0.0 for shot 1).\n"
+            f"   - 'provisional_end_seconds': float timestamp strictly greater than provisional_start_seconds.\n"
+            f"   - 'expected_duration': float duration in seconds (provisional_end_seconds - provisional_start_seconds).\n"
+            f"   - 'action_event_index': zero-based integer index pointing to the corresponding event in 'action_timeline' if this shot directly depicts that action event; or null if it does not correspond to an action event.\n\n"
+            f"   PROVISIONAL TIMING & ACTION LINKAGE RULES:\n"
+            f"   - Chronological and contiguous: shot 1 starts at 0.0s. Subsequent shots start at or immediately after the previous shot ends (no overlaps: shot[i].provisional_end_seconds <= shot[i+1].provisional_start_seconds).\n"
+            f"   - Shot durations must be positive and practical (typically 1.5s to 3.5s per shot).\n"
+            f"   - Total provisional shot duration should sum to approximately the scene duration ({est_duration}s).\n"
+            f"   - Never reference an absent action event: action_event_index must be between 0 and len(action_timeline) - 1, or null.\n\n"
             f"CRITICAL FORMATTING REQUIREMENT:\n"
-            f"Do NOT write any introductory remarks, notes, or explanations before or after the JSON. Return ONLY a valid JSON object starting with '{{' and ending with '}}' matching this exact structure:\n"
+            f"Do NOT write any introductory remarks, notes, or explanations before or after the JSON. Return ONLY a valid JSON object starting with '{{' and ending with '}}' matching one of these structures:\n\n"
+            f"Multi-action scene example (2 distinct actions):\n"
             f"{{\n"
-            f"  \"visual_prompt\": \"Cinematic close-up of ...\",\n"
-            f"  \"search_keywords\": [\"keyword1\", \"keyword2\", \"keyword3\"]\n"
+            f"  \"visual_prompt\": \"Cinematic macro close-up of cooking oil poured into a hot pan, followed by crisp sliced carrots added to sizzle.\",\n"
+            f"  \"search_keywords\": [\"pouring oil pan\", \"cooking carrots wok\", \"vegetable stir fry skillet\"],\n"
+            f"  \"action_timeline\": [\n"
+            f"    {{\n"
+            f"      \"action_description\": \"Pouring cooking oil into hot pan\",\n"
+            f"      \"visual_start_seconds\": 0.0,\n"
+            f"      \"visual_end_seconds\": 2.0,\n"
+            f"      \"sound_type\": \"action\",\n"
+            f"      \"sfx_query\": \"oil sizzling hot pan\",\n"
+            f"      \"sfx_start_seconds\": 0.5,\n"
+            f"      \"sfx_duration_seconds\": 1.5,\n"
+            f"      \"sfx_volume\": 0.35\n"
+            f"    }},\n"
+            f"    {{\n"
+            f"      \"action_description\": \"Adding sliced carrots into sizzling pan\",\n"
+            f"      \"visual_start_seconds\": 2.0,\n"
+            f"      \"visual_end_seconds\": 4.0,\n"
+            f"      \"sound_type\": \"action\",\n"
+            f"      \"sfx_query\": \"vegetables dropping hot oil\",\n"
+            f"      \"sfx_start_seconds\": 2.2,\n"
+            f"      \"sfx_duration_seconds\": 1.5,\n"
+            f"      \"sfx_volume\": 0.4\n"
+            f"    }}\n"
+            f"  ],\n"
+            f"  \"shot_plan\": [\n"
+            f"    {{\n"
+            f"      \"shot_index\": 1,\n"
+            f"      \"required_visible_action\": \"Pouring golden cooking oil into hot pan\",\n"
+            f"      \"primary_subject\": \"Cooking oil streaming into pan\",\n"
+            f"      \"required_setting\": \"Stovetop skillet\",\n"
+            f"      \"visual_state\": \"oil heating shimmering\",\n"
+            f"      \"camera_framing\": \"close-up\",\n"
+            f"      \"search_keywords\": [\"pouring oil pan\", \"hot skillet oil shimmering\"],\n"
+            f"      \"required_objects\": [\"skillet\", \"cooking oil bottle\"],\n"
+            f"      \"explicit_exclusions\": [\"meat\", \"chicken\", \"bathtub\", \"salad bowl\"],\n"
+            f"      \"provisional_start_seconds\": 0.0,\n"
+            f"      \"provisional_end_seconds\": 2.0,\n"
+            f"      \"expected_duration\": 2.0,\n"
+            f"      \"action_event_index\": 0\n"
+            f"    }},\n"
+            f"    {{\n"
+            f"      \"shot_index\": 2,\n"
+            f"      \"required_visible_action\": \"Dropping fresh sliced carrots into hot oil\",\n"
+            f"      \"primary_subject\": \"Sliced orange carrots\",\n"
+            f"      \"required_setting\": \"Stovetop skillet\",\n"
+            f"      \"visual_state\": \"carrots hitting hot oil sizzling\",\n"
+            f"      \"camera_framing\": \"macro close-up\",\n"
+            f"      \"search_keywords\": [\"adding carrots wok\", \"sliced carrots stir fry\"],\n"
+            f"      \"required_objects\": [\"sliced carrots\", \"skillet\"],\n"
+            f"      \"explicit_exclusions\": [\"meat\", \"seafood\", \"crab\", \"bathtub\"],\n"
+            f"      \"provisional_start_seconds\": 2.0,\n"
+            f"      \"provisional_end_seconds\": 4.0,\n"
+            f"      \"expected_duration\": 2.0,\n"
+            f"      \"action_event_index\": 1\n"
+            f"    }}\n"
+            f"  ]\n"
+            f"}}\n\n"
+            f"Single-action scene example:\n"
+            f"{{\n"
+            f"  \"visual_prompt\": \"Cinematic macro close-up of water simmering in a stainless steel kettle\",\n"
+            f"  \"search_keywords\": [\"water simmering kettle\", \"boiling water steam close up\"],\n"
+            f"  \"action_timeline\": [\n"
+            f"    {{\n"
+            f"      \"action_description\": \"Water heating and bubbling gently in kettle\",\n"
+            f"      \"visual_start_seconds\": 0.0,\n"
+            f"      \"visual_end_seconds\": 4.0,\n"
+            f"      \"sound_type\": \"action\",\n"
+            f"      \"sfx_query\": \"water simmering bubbling\",\n"
+            f"      \"sfx_start_seconds\": 0.5,\n"
+            f"      \"sfx_duration_seconds\": 3.0,\n"
+            f"      \"sfx_volume\": 0.35\n"
+            f"    }}\n"
+            f"  ],\n"
+            f"  \"shot_plan\": null\n"
             f"}}\n"
         )
 
@@ -401,9 +829,29 @@ class GroqScriptProvider(ScriptProvider):
 
         try:
             validated = VisualSpecificationSchema.model_validate(json_data)
+            self.last_shot_plan_fallback_occurred = False
+            self.last_shot_plan_error = None
+            return validated.model_dump()
         except ValidationError as e:
+            # Check if shot_plan was provided and caused the validation failure
+            has_shot_plan = bool(json_data.get("shot_plan"))
+            if has_shot_plan and self.fallback_to_single_shot:
+                # Attempt safe fallback by validating base visual spec without shot_plan
+                fallback_data = dict(json_data)
+                fallback_data["shot_plan"] = None
+                try:
+                    base_validated = VisualSpecificationSchema.model_validate(fallback_data)
+                    self.last_shot_plan_fallback_occurred = True
+                    self.last_shot_plan_error = str(e)
+                    logger.warning(
+                        "Groq shot_plan validation failed: %s. Safely falling back to single-shot visual specification (shot_plan=None).",
+                        e
+                    )
+                    return base_validated.model_dump()
+                except ValidationError:
+                    # Even base specification is invalid
+                    pass
+
             raise InvalidScriptResponseError(
                 f"Pydantic visual specification validation failed: {str(e)}"
             ) from e
-
-        return validated.model_dump()

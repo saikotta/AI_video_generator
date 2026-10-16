@@ -1,6 +1,4 @@
 from app.services.providers.base import ScriptProvider
-from app.services.providers.ollama_script_provider import OllamaScriptProvider
-from app.services.providers.groq_script_provider import GroqScriptProvider
 from app.services.providers.factory import get_script_provider
 from app.services.providers.exceptions import (
     ScriptProviderError,
@@ -19,3 +17,12 @@ __all__ = [
     "ScriptGenerationTimeoutError",
     "InvalidScriptResponseError"
 ]
+
+def __getattr__(name: str):
+    if name == "GroqScriptProvider":
+        from app.services.providers.groq_script_provider import GroqScriptProvider
+        return GroqScriptProvider
+    if name == "OllamaScriptProvider":
+        from app.services.providers.ollama_script_provider import OllamaScriptProvider
+        return OllamaScriptProvider
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")

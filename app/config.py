@@ -7,19 +7,20 @@ class Settings(BaseSettings):
     JWT_EXPIRE_MINUTES: int = 1440
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "llama3.2"
-    NARRATION_WPM: int = 150
+    NARRATION_WPM: int = 130
+    CALIBRATED_NARRATION_WPM: int = 130
     PEXELS_API_KEY: str = ""
     MEDIA_STORAGE_PATH: str = "./media"
     TTS_VOICE: str = "en-US-ChristopherNeural"
     FREESOUND_API_KEY: str = ""
 
     GROQ_API_KEY: str = ""
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_MODEL: str = "openai/gpt-oss-120b"
     GROQ_MAX_CONCURRENCY: int = 5
     GROQ_MAX_RETRIES: int = 5
     GROQ_RETRY_BASE_DELAY: float = 1.0
     ENABLE_SCRIPT_CACHE: bool = False
-    SCRIPT_PROVIDER: str = "ollama"
+    SCRIPT_PROVIDER: str = "groq"
 
     model_config = SettingsConfigDict(
         env_file=".env",

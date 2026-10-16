@@ -181,12 +181,47 @@ def get_single_visual_frame(
     visual_data: Dict[str, Any],
     t: float,
     duration: float,
-    target_size: Tuple[int, int] = (1280, 720)
+    target_size: Tuple[int, int] = (1280, 720),
+    fps: float = 24.0
 ) -> Image.Image:
-    """Render raw visual frame at time t for a scene (supporting multi-clip cuts and static fallbacks)."""
+    """Render raw visual frame at time t for a scene (supporting multi-shot sequential clips, multi-clip cuts, and static fallbacks)."""
     target_w, target_h = target_size
 
-    if visual_data.get("is_multi_clip"):
+    if visual_data.get("is_multi_shot"):
+        fps_val = visual_data.get("fps", fps)
+        total_frames = visual_data.get("total_frames", int(np.ceil(duration * fps_val)))
+        shots = visual_data.get("shots", [])
+
+        if not shots:
+            return Image.new("RGB", (target_w, target_h), (0, 0, 0))
+
+        # Deterministic integer frame index calculation (MoviePy samples at t = k / fps)
+        frame_idx = min(total_frames - 1, max(0, int(round(t * fps_val))))
+
+        # Chronological straight cuts based on authoritative integer boundaries
+        target_shot = None
+        for s in shots:
+            if s["start_frame"] <= frame_idx < s["end_frame"]:
+                target_shot = s
+                break
+        if target_shot is None:
+            target_shot = shots[-1]
+
+        intra_frame = frame_idx - target_shot["start_frame"]
+        intra_t = intra_frame / float(fps_val)
+
+        if target_shot.get("is_video", True):
+            v_clip = target_shot["video_clip"]
+            t_bounded = max(0.0, min(v_clip.duration - 0.04, intra_t % max(0.04, v_clip.duration)))
+            raw_frame = v_clip.get_frame(t_bounded)
+            return ImageOps.fit(Image.fromarray(raw_frame), (target_w, target_h), Image.Resampling.LANCZOS)
+        else:
+            canvas = target_shot["canvas"]
+            shot_dur = target_shot.get("duration_seconds", max(0.1, (target_shot["end_frame"] - target_shot["start_frame"]) / float(fps_val)))
+            _, _, frame_img = get_ken_burns_crop_box_and_frame(canvas, intra_t, shot_dur, 1.00, 1.22, target_size)
+            return frame_img
+
+    elif visual_data.get("is_multi_clip"):
         clips_list = visual_data["clips_list"]
         split_t = visual_data["split_t"]
         crossfade_in = 0.4
@@ -313,8 +348,242 @@ def safe_open_video_clip(media_path: str, max_retries: int = 3, retry_delay: flo
             time.sleep(retry_delay * (attempt + 1))
     raise RuntimeError(f"Failed to open video clip {media_path} after {max_retries} attempts: {last_err}")
 
-def load_scene_visual_data(scene_dict: Dict[str, Any], duration: float) -> Dict[str, Any]:
-    """Load visual data for a scene (supporting multi-clip lists or single clip/image)."""
+def map_shots_to_media_files(
+    reconciled_shots: List[Any],
+    media_paths: List[str],
+    shot_metadata: Optional[List[Dict[str, Any]]] = None
+) -> Dict[int, str]:
+    """
+    Deterministically map each planned shot_index to its corresponding media file path.
+    Inspects shot_metadata and available filename patterns.
+    Never assumes len(media_paths) == len(reconciled_shots).
+    Raises RuntimeError if existing metadata cannot unambiguously map shots to files.
+    """
+    mapped: Dict[int, str] = {}
+    valid_shot_indices = set()
+    for s in reconciled_shots:
+        idx = s.get("shot_index") if isinstance(s, dict) else getattr(s, "shot_index")
+        valid_shot_indices.add(idx)
+
+    # 1. If shot_metadata is provided, use explicit linkages
+    if shot_metadata:
+        # Check if each shot_metadata has an explicit local_path
+        has_paths_in_meta = all(
+            (m.get("local_path") or m.get("file_path")) for m in shot_metadata
+        )
+        if has_paths_in_meta:
+            for m in shot_metadata:
+                idx = m.get("shot_index")
+                p = m.get("local_path") or m.get("file_path")
+                if idx in valid_shot_indices and p and os.path.exists(p):
+                    mapped[idx] = p
+            return mapped
+
+        # If len(shot_metadata) == len(media_paths), they are 1-to-1 parallel lists from Stage 5
+        if len(shot_metadata) == len(media_paths):
+            for meta, path in zip(shot_metadata, media_paths):
+                meta_idx = meta.get("shot_index")
+                base = os.path.basename(path)
+                fn_match = re.search(r'(?:^|_)shot_(\d+)(?:_|\.|$)', base, re.IGNORECASE)
+                if fn_match:
+                    fn_idx = int(fn_match.group(1))
+                    if fn_idx != meta_idx:
+                        raise RuntimeError(
+                            f"Conflicting shot metadata contract: metadata specifies shot_index {meta_idx} "
+                            f"but file '{base}' indicates shot_index {fn_idx}."
+                        )
+                if meta_idx in valid_shot_indices:
+                    mapped[meta_idx] = path
+            return mapped
+
+        # If lengths differ, try matching filenames via _shot_{idx}_ or pexels_id
+        for path in media_paths:
+            base = os.path.basename(path)
+            fn_match = re.search(r'(?:^|_)shot_(\d+)(?:_|\.|$)', base, re.IGNORECASE)
+            if fn_match:
+                fn_idx = int(fn_match.group(1))
+                if fn_idx in valid_shot_indices:
+                    mapped[fn_idx] = path
+                    continue
+
+            # Try matching via pexels_id
+            matched = False
+            for meta in shot_metadata:
+                pid = str(meta.get("pexels_id") or meta.get("id", ""))
+                if pid and pid in base:
+                    meta_idx = meta.get("shot_index")
+                    if meta_idx in valid_shot_indices:
+                        mapped[meta_idx] = path
+                        matched = True
+                        break
+            if not matched:
+                raise RuntimeError(
+                    f"Unresolvable shot-to-file mapping: media file '{base}' cannot be unambiguously mapped "
+                    f"to shot_metadata (shot_metadata count: {len(shot_metadata)}, media_paths count: {len(media_paths)})."
+                )
+        return mapped
+
+    # 2. If shot_metadata is not provided
+    if len(media_paths) == len(reconciled_shots):
+        # 1-to-1 sequential mapping
+        for s, path in zip(reconciled_shots, media_paths):
+            idx = s.get("shot_index") if isinstance(s, dict) else getattr(s, "shot_index")
+            mapped[idx] = path
+        return mapped
+
+    # If counts differ without shot_metadata, inspect filenames
+    for path in media_paths:
+        base = os.path.basename(path)
+        fn_match = re.search(r'(?:^|_)shot_(\d+)(?:_|\.|$)', base, re.IGNORECASE)
+        if fn_match:
+            fn_idx = int(fn_match.group(1))
+            if fn_idx in valid_shot_indices:
+                mapped[fn_idx] = path
+                continue
+        raise RuntimeError(
+            f"Unresolvable shot-to-file mapping: media_paths count ({len(media_paths)}) does not match "
+            f"reconciled_shots count ({len(reconciled_shots)}) and file '{base}' lacks shot index identifier."
+        )
+
+    return mapped
+
+def load_scene_visual_data(
+    scene_dict: Dict[str, Any],
+    duration: float,
+    fps: float = 24.0
+) -> Dict[str, Any]:
+    """Load visual data for a scene (supporting multi-shot sequential clips, multi-clip lists, or single clip/image)."""
+    # 1. MULTI-SHOT SEQUENTIAL RENDERING BRANCH (Step 11B.4)
+    is_multi_shot = bool(scene_dict.get("is_multi_shot") or scene_dict.get("reconciled_shots"))
+    if is_multi_shot and scene_dict.get("reconciled_shots"):
+        reconciled_shots = scene_dict["reconciled_shots"]
+        media_paths = scene_dict.get("media_paths") or []
+        shot_metadata = scene_dict.get("shot_metadata") or []
+
+        # Map shot_index -> media file path
+        shot_to_path = map_shots_to_media_files(reconciled_shots, media_paths, shot_metadata)
+
+        # Detect any missing shots
+        missing_shots = []
+        for r_shot in reconciled_shots:
+            s_idx = r_shot.get("shot_index") if isinstance(r_shot, dict) else r_shot.shot_index
+            p = shot_to_path.get(s_idx)
+            if not p or not os.path.exists(p):
+                missing_shots.append({
+                    "shot_index": s_idx,
+                    "required_visible_action": r_shot.get("required_visible_action") if isinstance(r_shot, dict) else getattr(r_shot, "required_visible_action", None),
+                    "primary_subject": r_shot.get("primary_subject") if isinstance(r_shot, dict) else getattr(r_shot, "primary_subject", None),
+                    "reason": "Missing or non-existent media file"
+                })
+
+        if missing_shots:
+            scene_dict["visual_coverage_complete"] = False
+            if "missing_shots" not in scene_dict or not scene_dict["missing_shots"]:
+                scene_dict["missing_shots"] = missing_shots
+            if not scene_dict.get("fallback_used"):
+                scene_dict["fallback_used"] = "fallback_shot_applied_for_missing_footage"
+
+        # Determine available shot indices
+        available_shot_indices = [
+            (r_shot.get("shot_index") if isinstance(r_shot, dict) else r_shot.shot_index)
+            for r_shot in reconciled_shots
+            if shot_to_path.get(r_shot.get("shot_index") if isinstance(r_shot, dict) else r_shot.shot_index)
+            and os.path.exists(shot_to_path[r_shot.get("shot_index") if isinstance(r_shot, dict) else r_shot.shot_index])
+        ]
+
+        scene_fallback_path = scene_dict.get("media_path") or scene_dict.get("image_path") or scene_dict.get("video_path")
+
+        if not available_shot_indices and (not scene_fallback_path or not os.path.exists(scene_fallback_path)):
+            raise FileNotFoundError(
+                f"No visual media available for multi-shot scene {scene_dict.get('scene_order', 1)}: "
+                f"all {len(reconciled_shots)} shots missing and no scene-level media path found."
+            )
+
+        opened_clips: Dict[str, VideoFileClip] = {}
+        unique_opened_clips: List[VideoFileClip] = []
+
+        def get_or_open_clip(p: str) -> VideoFileClip:
+            if p not in opened_clips:
+                clip = safe_open_video_clip(p)
+                opened_clips[p] = clip
+                unique_opened_clips.append(clip)
+            return opened_clips[p]
+
+        loaded_shots = []
+        for r_shot in reconciled_shots:
+            s_idx = r_shot.get("shot_index") if isinstance(r_shot, dict) else r_shot.shot_index
+            s_start_frame = r_shot.get("start_frame") if isinstance(r_shot, dict) else r_shot.start_frame
+            s_end_frame = r_shot.get("end_frame") if isinstance(r_shot, dict) else r_shot.end_frame
+            s_allocated = r_shot.get("allocated_frames") if isinstance(r_shot, dict) else r_shot.allocated_frames
+            s_dur = s_allocated / float(fps)
+
+            target_path = shot_to_path.get(s_idx)
+            is_fallback = False
+            fallback_source = None
+
+            if not target_path or not os.path.exists(target_path):
+                is_fallback = True
+                preceding = [idx for idx in available_shot_indices if idx < s_idx]
+                subsequent = [idx for idx in available_shot_indices if idx > s_idx]
+
+                if preceding:
+                    chosen_idx = max(preceding)
+                    target_path = shot_to_path[chosen_idx]
+                    fallback_source = f"shot_{chosen_idx}_extended"
+                elif subsequent:
+                    chosen_idx = min(subsequent)
+                    target_path = shot_to_path[chosen_idx]
+                    fallback_source = f"shot_{chosen_idx}_borrowed"
+                elif scene_fallback_path and os.path.exists(scene_fallback_path):
+                    target_path = scene_fallback_path
+                    fallback_source = "scene_fallback_media"
+                else:
+                    raise FileNotFoundError(f"Cannot resolve fallback for missing shot {s_idx} in scene {scene_dict.get('scene_order', 1)}")
+
+            is_vid = target_path.lower().endswith(".mp4") or scene_dict.get("media_type") == "video"
+            if is_vid:
+                raw_clip = get_or_open_clip(target_path)
+                aligned_clip = loop_video_clip_if_needed(raw_clip, s_dur)
+                loaded_shots.append({
+                    "shot_index": s_idx,
+                    "start_frame": s_start_frame,
+                    "end_frame": s_end_frame,
+                    "allocated_frames": s_allocated,
+                    "duration_seconds": s_dur,
+                    "is_video": True,
+                    "video_clip": aligned_clip,
+                    "is_fallback": is_fallback,
+                    "fallback_source": fallback_source,
+                    "media_path": target_path
+                })
+            else:
+                img = Image.open(target_path).convert("RGB")
+                canvas = prep_16_9_canvas(img, (1920, 1080))
+                loaded_shots.append({
+                    "shot_index": s_idx,
+                    "start_frame": s_start_frame,
+                    "end_frame": s_end_frame,
+                    "allocated_frames": s_allocated,
+                    "duration_seconds": s_dur,
+                    "is_video": False,
+                    "canvas": canvas,
+                    "is_fallback": is_fallback,
+                    "fallback_source": fallback_source,
+                    "media_path": target_path
+                })
+
+        total_frames = reconciled_shots[-1].get("end_frame") if isinstance(reconciled_shots[-1], dict) else reconciled_shots[-1].end_frame
+
+        return {
+            "is_multi_shot": True,
+            "shots": loaded_shots,
+            "total_frames": total_frames,
+            "fps": fps,
+            "exact_duration": duration,
+            "opened_clips": unique_opened_clips
+        }
+
+    # 2. LEGACY BRANCHES (Scenes >8s multi-clip, single video, or Ken Burns photo)
     media_paths = scene_dict.get("media_paths")
 
     if media_paths and isinstance(media_paths, list) and len(media_paths) >= 2:
@@ -366,6 +635,59 @@ def load_scene_visual_data(scene_dict: Dict[str, Any], duration: float) -> Dict[
             "media_path": media_path
         }
 
+def apply_edge_fades(
+    pcm_chunk: np.ndarray,
+    sample_rate: int = 44100,
+    fade_ms: float = 50.0
+) -> np.ndarray:
+    """
+    Apply smooth linear fade-in and fade-out to audio chunk to prevent boundary clicks.
+    Handles short clips (< 100ms) safely by scaling fade length to at most half the chunk length.
+    Preserves audio pitch and spoken duration.
+    """
+    if pcm_chunk is None or len(pcm_chunk) == 0:
+        return pcm_chunk
+
+    chunk = pcm_chunk.copy()
+    n_samples = len(chunk)
+
+    target_fade_samples = int(round((fade_ms / 1000.0) * sample_rate))
+    # Cap fade to at most half of the available chunk length
+    fade_len = min(target_fade_samples, n_samples // 2)
+
+    if fade_len > 0:
+        fade_in = np.linspace(0.0, 1.0, fade_len, dtype=np.float32)
+        fade_out = np.linspace(1.0, 0.0, fade_len, dtype=np.float32)
+
+        if chunk.ndim == 2:
+            fade_in = fade_in[:, np.newaxis]
+            fade_out = fade_out[:, np.newaxis]
+
+        chunk[:fade_len] *= fade_in
+        chunk[-fade_len:] *= fade_out
+
+    return chunk
+
+def parse_sfx_volume(raw_volume: Any, default: float = 1.0) -> float:
+    """
+    Parse action-specific SFX volume safely.
+    Valid range: 0.0 to 1.0.
+    Missing (None) retains existing default behavior (1.0 scale factor).
+    0.0 means completely silent.
+    Invalid values (negative, > 1.0, non-numeric, NaN, Inf) safely fallback to default.
+    """
+    if raw_volume is None:
+        return default
+    try:
+        val = float(raw_volume)
+        if math.isnan(val) or math.isinf(val):
+            return default
+        if 0.0 <= val <= 1.0:
+            return val
+        return max(0.0, min(1.0, val))
+    except (ValueError, TypeError):
+        return default
+
 def mix_scene_audio_pcm(
     raw_narration_path: str,
     segment_sfx_list: List[Dict[str, Any]],
@@ -375,8 +697,12 @@ def mix_scene_audio_pcm(
     target_dir: str = "c:/AiVideoGenerator/media/audio_resampled"
 ) -> str:
     """
-    Direct PCM numpy audio stream mixing for scene narration + segment action SFX.
-    Pre-mixes audio into a single clean 44.1kHz 16-bit PCM WAV file.
+    Direct PCM numpy audio stream mixing for three independent layers:
+      1. Narration — 100% authoritative primary voiceover baseline.
+      2. Ambience — Quiet environmental background audio (~10% relative amplitude).
+      3. Action SFX — Event-triggered sound effects at precise offsets with ~50ms edge fades
+         and per-event volume control.
+    Pre-mixes audio into a single clean 44.1kHz 16-bit stereo PCM WAV file.
     Eliminates MoviePy audio tree recursion and float64 memory allocation errors.
     """
     os.makedirs(target_dir, exist_ok=True)
@@ -391,23 +717,64 @@ def mix_scene_audio_pcm(
     target_samples = int(round(exact_duration * 44100))
     mixed_pcm = np.zeros((target_samples, 2), dtype=np.float32)
 
-    # Place 100% authoritative narration audio
+    # 1. LAYER 1: Narration (100% authoritative primary layer)
     narr_len = min(target_samples, len(narr_pcm))
     mixed_pcm[:narr_len] = narr_pcm[:narr_len]
 
-    rms_narr = float(np.sqrt(np.mean(mixed_pcm ** 2))) if mixed_pcm.size > 0 else 1000.0
-    if rms_narr < 1.0:
+    # Reference loudness anchor from pure narration
+    rms_narr = float(np.sqrt(np.mean(narr_pcm[:narr_len] ** 2))) if narr_len > 0 else 1000.0
+    if rms_narr < 1.0 or math.isnan(rms_narr):
         rms_narr = 1000.0
 
-    # Composite segment-level action SFX at ~20% relative amplitude (15-25% target range) with 1.50x max gain cap
-    target_amp_ratio = 0.20
     max_gain_cap = 1.50
 
+    # 2. LAYER 2: Ambience (Quiet environmental background, independent of SFX)
+    amb_base_ratio = 0.10  # ~10% of narration RMS (quiet environmental bed)
+    if ambient_audio_path and os.path.exists(ambient_audio_path):
+        amb_resample_wav = ensure_resampled_audio(ambient_audio_path, target_dir=target_dir)
+        with wave.open(amb_resample_wav, "rb") as wf:
+            amb_bytes = wf.readframes(wf.getnframes())
+            amb_pcm = np.frombuffer(amb_bytes, dtype=np.int16).astype(np.float32).reshape(-1, 2)
+
+        if len(amb_pcm) > 0:
+            if len(amb_pcm) < target_samples:
+                num_loops = int(np.ceil(target_samples / float(len(amb_pcm))))
+                amb_pcm = np.tile(amb_pcm, (num_loops, 1))
+
+            amb_chunk = amb_pcm[:target_samples].copy()
+            rms_amb = float(np.sqrt(np.mean(amb_chunk ** 2))) if amb_chunk.size > 0 else 1000.0
+            amb_vol_mult = (rms_narr / max(10.0, rms_amb)) * amb_base_ratio
+            amb_vol_mult = min(max_gain_cap, amb_vol_mult)
+
+            # Silence if ambient clip is imperceptible (< 5% narration even at max cap)
+            if (rms_amb * max_gain_cap) / rms_narr < 0.05:
+                amb_vol_mult = 0.0
+
+            if amb_vol_mult > 0.0:
+                peak_val = float(np.max(np.abs(amb_chunk))) if amb_chunk.size > 0 else 1.0
+                if peak_val * amb_vol_mult > 24000.0:
+                    amb_vol_mult = 24000.0 / peak_val
+                amb_vol_mult = max(0.01, min(max_gain_cap, amb_vol_mult))
+
+                # Smooth edge fade on ambient loop boundary
+                faded_amb = apply_edge_fades(amb_chunk, sample_rate=44100, fade_ms=50.0)
+                mixed_pcm[:target_samples] += faded_amb * amb_vol_mult
+
+    # 3. LAYER 3: Action SFX (Event-triggered sounds at precise offsets)
+    sfx_base_ratio = 0.20  # ~20% of narration RMS
     if segment_sfx_list:
         for seg_info in segment_sfx_list:
             seg_path = seg_info.get("audio_path")
             start_off = float(seg_info.get("start_offset", 0.0))
             seg_dur = float(seg_info.get("duration", exact_duration))
+
+            # Read action-specific volume (0.0 to 1.0)
+            raw_vol = seg_info.get("volume") if "volume" in seg_info else seg_info.get("sfx_volume")
+            event_vol = parse_sfx_volume(raw_vol, default=1.0)
+
+            # 0.0 volume means silent
+            if event_vol <= 0.0:
+                continue
 
             if seg_path and os.path.exists(seg_path):
                 seg_resample_wav = ensure_resampled_audio(seg_path, target_dir=target_dir)
@@ -423,55 +790,50 @@ def mix_scene_audio_pcm(
                     num_loops = int(np.ceil(seg_dur_samples / float(len(seg_pcm))))
                     seg_pcm = np.tile(seg_pcm, (num_loops, 1))
 
-                seg_chunk = seg_pcm[:seg_dur_samples]
+                seg_chunk = seg_pcm[:seg_dur_samples].copy()
                 rms_seg = float(np.sqrt(np.mean(seg_chunk ** 2))) if seg_chunk.size > 0 else 1000.0
+
+                # Target amplitude scaled by per-event volume (applied once here)
+                target_amp_ratio = sfx_base_ratio * event_vol
                 vol_mult = (rms_narr / max(10.0, rms_seg)) * target_amp_ratio
                 vol_mult = min(max_gain_cap, vol_mult)
 
-                # If source clip is too quiet even at 1.5x cap (< 5% narration amplitude), fallback to silence
+                # Silence if clip is too quiet even at 1.5x cap (< 5% narration amplitude)
                 if (rms_seg * max_gain_cap) / rms_narr < 0.05:
                     vol_mult = 0.0
 
                 if vol_mult > 0.0:
-                    # Peak limiting to protect against clipping (max headroom 28000 on int16 scale)
+                    # Peak limiting for SFX headroom (max 26000 on int16 scale)
                     peak_val = float(np.max(np.abs(seg_chunk))) if seg_chunk.size > 0 else 1.0
-                    if peak_val * vol_mult > 28000.0:
-                        vol_mult = 28000.0 / peak_val
-                    vol_mult = max(0.02, min(max_gain_cap, vol_mult))
+                    if peak_val * vol_mult > 26000.0:
+                        vol_mult = 26000.0 / peak_val
+                    vol_mult = max(0.001, min(max_gain_cap, vol_mult))
 
-                    start_sample = int(round(start_off * 44100))
+                    # Apply ~50ms smooth linear fade-in and fade-out to prevent clicks
+                    faded_sfx = apply_edge_fades(seg_chunk, sample_rate=44100, fade_ms=50.0)
+
+                    start_sample = max(0, int(round(start_off * 44100)))
                     end_sample = min(target_samples, start_sample + seg_dur_samples)
 
                     available_len = end_sample - start_sample
                     if available_len > 0 and start_sample < target_samples:
-                        mixed_pcm[start_sample:end_sample] += seg_chunk[:available_len] * vol_mult
+                        chunk_to_add = faded_sfx[:available_len].copy()
+                        # If truncated by scene boundary, fade-out the truncated end safely
+                        if available_len < seg_dur_samples:
+                            trunc_fade = min(2205, available_len // 2)
+                            if trunc_fade > 0:
+                                fade_out_ramp = np.linspace(1.0, 0.0, trunc_fade, dtype=np.float32)[:, np.newaxis]
+                                chunk_to_add[-trunc_fade:] *= fade_out_ramp
 
-    elif ambient_audio_path and os.path.exists(ambient_audio_path):
-        amb_resample_wav = ensure_resampled_audio(ambient_audio_path, target_dir=target_dir)
-        with wave.open(amb_resample_wav, "rb") as wf:
-            amb_bytes = wf.readframes(wf.getnframes())
-            amb_pcm = np.frombuffer(amb_bytes, dtype=np.int16).astype(np.float32).reshape(-1, 2)
+                        mixed_pcm[start_sample:end_sample] += chunk_to_add * vol_mult
 
-        if len(amb_pcm) > 0:
-            if len(amb_pcm) < target_samples:
-                num_loops = int(np.ceil(target_samples / float(len(amb_pcm))))
-                amb_pcm = np.tile(amb_pcm, (num_loops, 1))
+    # Master mix protection: prevent clipping distortion when layers overlap
+    max_peak = float(np.max(np.abs(mixed_pcm))) if mixed_pcm.size > 0 else 0.0
+    if max_peak > 32000.0:
+        mixed_pcm = mixed_pcm * (32000.0 / max_peak)
 
-            amb_chunk = amb_pcm[:target_samples]
-            rms_amb = float(np.sqrt(np.mean(amb_chunk ** 2))) if amb_chunk.size > 0 else 1000.0
-            vol_mult = (rms_narr / max(10.0, rms_amb)) * target_amp_ratio
-            vol_mult = min(max_gain_cap, vol_mult)
-
-            if (rms_amb * max_gain_cap) / rms_narr < 0.05:
-                vol_mult = 0.0
-
-            if vol_mult > 0.0:
-                peak_val = float(np.max(np.abs(amb_chunk))) if amb_chunk.size > 0 else 1.0
-                if peak_val * vol_mult > 28000.0:
-                    vol_mult = 28000.0 / peak_val
-                vol_mult = max(0.02, min(max_gain_cap, vol_mult))
-
-                mixed_pcm[:target_samples] += amb_chunk * vol_mult
+    # Sanitize any nonfinite values (NaN / Inf)
+    mixed_pcm = np.nan_to_num(mixed_pcm, copy=False, nan=0.0, posinf=32000.0, neginf=-32000.0)
 
     mixed_int16 = np.clip(mixed_pcm, -32768, 32767).astype(np.int16)
 
@@ -483,31 +845,23 @@ def mix_scene_audio_pcm(
 
     return output_wav
 
-def create_scene_clip(
-    scene_dict: Dict[str, Any],
-    next_scene_dict: Optional[Dict[str, Any]] = None,
-    crossfade_duration: float = 0.4,
-    target_size: Tuple[int, int] = (1280, 720),
-    fps: float = 24.0
-) -> VideoClip:
-    """
-    Create MoviePy VideoClip for a single scene beat:
-    - Calculates ceiling frame-exact duration for 24fps (preserving full narration audio).
-    - Composites 100% authoritative narration audio with secondary 15% volume ambient sound track (if present).
-    - Supports multiple short clips per scene (Part B for scenes > 8s).
-    """
-    raw_narration_path = scene_dict["audio_path"]
-    scene_text = scene_dict["scene_text"]
-    orig_duration = float(scene_dict["duration"])
-
-    if not os.path.exists(raw_narration_path):
-        raise FileNotFoundError(f"Scene narration audio file missing: {raw_narration_path}")
-
 def close_visual_data(visual_data: Optional[Dict[str, Any]]) -> None:
     """Explicitly close all open video clip handles in a visual data dictionary."""
     if not visual_data:
         return
-    if visual_data.get("is_multi_clip"):
+    if visual_data.get("is_multi_shot"):
+        for c in visual_data.get("opened_clips", []):
+            try:
+                c.close()
+            except Exception:
+                pass
+        for s in visual_data.get("shots", []):
+            try:
+                if s.get("is_video") and s.get("video_clip"):
+                    s["video_clip"].close()
+            except Exception:
+                pass
+    elif visual_data.get("is_multi_clip"):
         for c in visual_data.get("clips_list", []):
             try:
                 c.close()
@@ -534,8 +888,8 @@ def create_scene_clip(
     orig_duration = float(scene_dict["duration"])
     exact_duration = compute_frame_exact_duration(orig_duration, fps=fps)
 
-    scene_visual = load_scene_visual_data(scene_dict, exact_duration)
-    next_scene_visual = load_scene_visual_data(next_scene_dict, exact_duration) if next_scene_dict else None
+    scene_visual = load_scene_visual_data(scene_dict, exact_duration, fps=float(fps))
+    next_scene_visual = load_scene_visual_data(next_scene_dict, exact_duration, fps=float(fps)) if next_scene_dict else None
 
     sub_chunks = split_text_into_subtitles(scene_text)
     sub_timeline = build_subtitle_timeline(sub_chunks, exact_duration)
@@ -551,9 +905,25 @@ def create_scene_clip(
             target_size=target_size
         )
 
-    return VideoClip(make_frame, duration=exact_duration)
+    clip = VideoClip(make_frame, duration=exact_duration)
+    orig_close = clip.close
 
-def assemble_video(scenes: List[Dict[str, Any]], output_path: str, fps: int = 24, crossfade_duration: float = 0.4) -> str:
+    def _cleanup_and_close():
+        orig_close()
+        close_visual_data(scene_visual)
+        if next_scene_visual:
+            close_visual_data(next_scene_visual)
+
+    clip.close = _cleanup_and_close
+    return clip
+
+def assemble_video(
+    scenes: List[Dict[str, Any]],
+    output_path: str,
+    fps: int = 24,
+    crossfade_duration: float = 0.4,
+    resampled_dir: Optional[str] = None
+) -> str:
     """
     Assemble list of scene dicts into a single continuous MP4 video using a sliding-window clip reader:
     - Aligns every scene to ceiling 24fps duration (preserving untrimmed narration audio).
@@ -561,9 +931,12 @@ def assemble_video(scenes: List[Dict[str, Any]], output_path: str, fps: int = 24
     - Composites balanced action SFX at ~20% relative amplitude (capped at max 1.50x gain).
     - Sliding-Window Clip Management: Only holds current scene + next scene visual clips open (<= 4 clips max).
     - Concatenates into MP4 (H.264 video, AAC audio, 1280x720 res).
+    - Project-Specific Audio Isolation: Optional resampled_dir isolates all intermediate audio WAV files.
     """
     if not scenes:
         raise ValueError("Cannot assemble video with empty scenes list.")
+
+    target_resampled_dir = resampled_dir or "c:/AiVideoGenerator/media/audio_resampled"
 
     sorted_scenes = sorted(scenes, key=lambda x: x["scene_order"])
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
@@ -586,13 +959,14 @@ def assemble_video(scenes: List[Dict[str, Any]], output_path: str, fps: int = 24
         end_t = cum_t + exact_duration
         cum_t = end_t
 
-        # Mix scene PCM audio
+        # Mix scene PCM audio into project-specific resampled directory
         mixed_wav = mix_scene_audio_pcm(
             raw_narration_path=raw_narration_path,
             segment_sfx_list=segment_sfx_list,
             ambient_audio_path=ambient_audio_path,
             exact_duration=exact_duration,
-            scene_order=scene_order
+            scene_order=scene_order,
+            target_dir=target_resampled_dir
         )
 
         with wave.open(mixed_wav, "rb") as wf:
@@ -632,7 +1006,7 @@ def assemble_video(scenes: List[Dict[str, Any]], output_path: str, fps: int = 24
     def get_scene_visual_cached(scene_idx: int) -> Dict[str, Any]:
         if scene_idx not in active_visual_cache:
             info = scene_timeline[scene_idx]
-            active_visual_cache[scene_idx] = load_scene_visual_data(info["scene_dict"], info["exact_duration"])
+            active_visual_cache[scene_idx] = load_scene_visual_data(info["scene_dict"], info["exact_duration"], fps=float(fps))
         return active_visual_cache[scene_idx]
 
     def make_master_frame(t: float) -> np.ndarray:

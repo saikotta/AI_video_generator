@@ -5,7 +5,7 @@ from typing import Optional
 from pydantic import ValidationError
 
 from app.config import settings
-from app.schemas.scene import SceneListSchema
+from app.schemas.scene import SceneItemSchema, SceneListSchema
 from app.schemas.visual_spec import VisualSpecificationSchema
 from app.services.providers.base import ScriptProvider
 from app.services.providers.exceptions import (
