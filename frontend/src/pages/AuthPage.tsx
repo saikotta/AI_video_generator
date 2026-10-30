@@ -216,7 +216,7 @@ export default function AuthPage({ onAuth }: Props) {
           <main className="lumen-stage">
 
             {/* ════ SCREEN / CARD ════ */}
-            <section className="lumen-screen" aria-label={mode === 'login' ? 'Sign in to Lumen' : 'Create your Lumen account'}>
+            <section className="lumen-screen" aria-label={mode === 'login' ? 'Sign in to CEREVYN' : 'Create your CEREVYN account'}>
 
               {/* Brand */}
               <div className="lumen-brand lumen-fly">
@@ -224,7 +224,7 @@ export default function AuthPage({ onAuth }: Props) {
                   <circle cx="13" cy="13" r="11.5" fill="none" stroke="#1b1814" strokeWidth="1.7"/>
                   <polygon points="10.5,8.5 10.5,17.5 19,13" fill="#1b1814"/>
                 </svg>
-                Lumen
+                CEREVYN
               </div>
 
               {/* Heading */}
@@ -236,7 +236,7 @@ export default function AuthPage({ onAuth }: Props) {
               <p className="lumen-sub lumen-fly">
                 {mode === 'login'
                   ? 'Sign in to keep turning ideas into video.'
-                  : 'Join Lumen and start generating AI-powered video.'}
+                  : 'Join CEREVYN and start generating AI-powered video.'}
               </p>
 
               <form onSubmit={handleSubmit} noValidate>
@@ -322,7 +322,7 @@ export default function AuthPage({ onAuth }: Props) {
 
               {/* Switch mode */}
               <p className="lumen-foot lumen-fly">
-                {mode === 'login' ? 'New to Lumen?' : 'Already have an account?'}{' '}
+                {mode === 'login' ? 'New to CEREVYN?' : 'Already have an account?'}{' '}
                 <button type="button" className="lumen-link-btn" onClick={switchMode}>
                   {mode === 'login' ? 'Create an account' : 'Sign in'}
                 </button>

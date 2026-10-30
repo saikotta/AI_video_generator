@@ -1,42 +1,77 @@
-#root {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
+.route-auth-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+}
+
+.route-transition-underlay {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: auto;
+  background: var(--bg, #f8f7f3);
+}
+
+.route-message {
+  min-height: 100vh;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 14px;
+  padding: 32px 20px;
   text-align: center;
+  color: #2a2118;
+  background: linear-gradient(160deg, #fbf7ee, #efe2c6);
+  animation: route-arrive 420ms cubic-bezier(.22,1,.36,1) both;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: filter 300ms;
-}
-.logo:hover {
-  filter: drop-shadow(0 0 2em #646cffaa);
-}
-.logo.react:hover {
-  filter: drop-shadow(0 0 2em #61dafbaa);
+.route-message h1 {
+  font: 500 clamp(40px, 8vw, 68px)/1 "Cormorant Garamond", Georgia, serif;
 }
 
-@keyframes logo-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+.route-message p { color: #7a6a55; }
+
+.route-message .route-eyebrow {
+  font: 600 11px Inter, sans-serif;
+  letter-spacing: .24em;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  a:nth-of-type(2) .logo {
-    animation: logo-spin infinite 20s linear;
-  }
+.route-home-link {
+  margin-top: 8px;
+  padding: 10px 18px;
+  border: 1px solid rgba(185,138,62,.5);
+  border-radius: 999px;
+  color: #2a2118;
+  transition: background 180ms ease, transform 180ms ease;
 }
 
-.card {
-  padding: 2em;
+.route-home-link:hover {
+  background: rgba(227,192,122,.22);
+  transform: translateY(-1px);
 }
 
-.read-the-docs {
-  color: #888;
+.route-loading {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: #0c0a07;
+}
+
+.route-loading span {
+  width: 38px;
+  height: 38px;
+  border: 3px solid #3a352f;
+  border-top-color: #f8f7f3;
+  border-radius: 50%;
+  animation: route-spin 800ms linear infinite;
+}
+
+@keyframes route-spin { to { transform: rotate(360deg); } }
+@keyframes route-arrive {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .route-message, .route-loading span { animation-duration: 1ms; }
 }
