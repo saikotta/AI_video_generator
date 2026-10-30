@@ -1,5 +1,5 @@
-/**
- * AuthPage.tsx — Cinematic Lumen login page
+﻿/**
+ * AuthPage.tsx — Cinematic CEREVYN login page
  *
  * Layout (top → bottom, vertically centred):
  *   • White cinema screen  ← login / register card
@@ -36,6 +36,13 @@ export default function AuthPage({ onAuth }: Props) {
   const [error, setError]       = useState('')
   const [loading, setLoading]   = useState(false)
   const [status, setStatus]     = useState('')
+  const [projectorOn, setProjectorOn] = useState(true)
+  const [projectorTouched, setProjectorTouched] = useState(false)
+
+  function toggleProjector() {
+    setProjectorTouched(true)
+    setProjectorOn(value => !value)
+  }
 
   const camRef      = useRef<HTMLDivElement>(null)
   const lensRef     = useRef<HTMLDivElement>(null)
@@ -211,12 +218,12 @@ export default function AuthPage({ onAuth }: Props) {
         ↺ Replay intro
       </button>
 
-      <div className="lumen-vp">
+      <div className="lumen-vp" data-projector={projectorOn ? 'on' : 'off'} data-switch-used={projectorTouched}>
         <div className="lumen-cam" id="lumen-cam" ref={camRef}>
           <main className="lumen-stage">
 
             {/* ════ SCREEN / CARD ════ */}
-            <section className="lumen-screen" aria-label={mode === 'login' ? 'Sign in to CEREVYN' : 'Create your CEREVYN account'}>
+            <section className="lumen-screen" aria-hidden={!projectorOn} aria-label={mode === 'login' ? 'Sign in to CEREVYN' : 'Create your CEREVYN account'}>
 
               {/* Brand */}
               <div className="lumen-brand lumen-fly">
@@ -337,18 +344,20 @@ export default function AuthPage({ onAuth }: Props) {
             {/* end screen */}
 
             {/* ════ BEAM ════ */}
-            <div className="lumen-beam-wrap" id="lumen-beam-wrap" aria-hidden="true">
+            <div className="lumen-beam-wrap" id="lumen-beam-wrap" aria-hidden={!projectorOn}>
               <div className="lumen-beam" />
               <div className="lumen-beam-core" />
             </div>
 
             {/* ════ PROJECTOR ════ */}
-            <div className="lumen-projw" aria-hidden="true" role="img" aria-label="Film projector">
+            <div className="lumen-projw">
               <div className="lumen-lensglow" ref={lensRef} />
 
               <svg
                 className="lumen-proj"
                 ref={projSvgRef}
+                role="group"
+                aria-label="Film projector and power switch"
                 viewBox="0 0 260 152"
                 xmlns="http://www.w3.org/2000/svg"
               >
@@ -425,8 +434,21 @@ export default function AuthPage({ onAuth }: Props) {
 
                 {/* Rocker switch housing */}
                 <rect x="84" y="88" width="30" height="26" rx="5" fill="#0d0c0a" stroke="#4a443c"/>
-                {/* Lever */}
-                <g className="lumen-lever">
+                {/* Functional projector switch */}
+                <g
+                  className="lumen-lever"
+                  role="switch"
+                  aria-label={projectorOn ? 'Turn projector off' : 'Turn projector on'}
+                  aria-checked={projectorOn}
+                  tabIndex={0}
+                  onClick={toggleProjector}
+                  onKeyDown={event => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      toggleProjector()
+                    }
+                  }}
+                >
                   <rect x="95" y="82" width="8" height="26" rx="4" fill="#d4cabb" stroke="#8a8272" strokeWidth="1"/>
                   <line x1="98" y1="88"  x2="100" y2="88"  stroke="#a09890" strokeWidth="1"/>
                   <line x1="98" y1="94"  x2="100" y2="94"  stroke="#a09890" strokeWidth="1"/>
@@ -435,7 +457,7 @@ export default function AuthPage({ onAuth }: Props) {
 
                 {/* Label plate */}
                 <rect x="36" y="122" width="38" height="16" rx="2" fill="#0d0c0a" stroke="#2a2520" strokeWidth=".8"/>
-                <text x="55" y="134" fontFamily="monospace" fontSize="5" fill="#5a5448" textAnchor="middle">LMN-16</text>
+                <text x="55" y="134" fontFamily="monospace" fontSize="5" fill="#5a5448" textAnchor="middle">CRV-16</text>
 
                 {/* Feet */}
                 <rect x="44"  y="140" width="30" height="9" rx="3" fill="#0e0d0b" stroke="#2a2520" strokeWidth=".8"/>
@@ -466,7 +488,7 @@ function GoogleIcon() {
 }
 
 /* ─────────────────────────────────────────────────────────────
-   All Lumen CSS (injected via <style> so it doesn't bleed into
+   All CEREVYN CSS (injected via <style> so it doesn't bleed into
    the rest of the app and doesn't require a separate .css file)
 ───────────────────────────────────────────────────────────── */
 const LUMEN_CSS = `
@@ -874,11 +896,51 @@ const LUMEN_CSS = `
   transform-origin: 50% 100%;
   transform: rotate(28deg);
   animation: l-leverFlip .22s cubic-bezier(.3,1.55,.5,1) 2.4s both;
+  cursor: pointer;
 }
 
 .lumen-pilot {
   animation: l-pilotGlow 3s linear 0s both;
 }
+
+.lumen-lever:focus-visible { filter: drop-shadow(0 0 5px #f0c56f); outline: none; }
+.lumen-screen { transition: opacity .55s ease, transform .55s ease, filter .55s ease, visibility 0s linear .55s; }
+.lumen-beam-wrap, .lumen-lensglow { transition: opacity .45s ease, visibility 0s linear .45s; }
+
+.lumen-vp[data-projector="off"] .lumen-screen {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-14px) scale(.97);
+  filter: blur(8px) brightness(1.8);
+  animation: none;
+}
+.lumen-vp[data-projector="off"] .lumen-beam-wrap,
+.lumen-vp[data-projector="off"] .lumen-lensglow { opacity: 0; visibility: hidden; animation: none; }
+.lumen-vp[data-projector="off"] .lumen-beam,
+.lumen-vp[data-projector="off"] .lumen-beam-core,
+.lumen-vp[data-projector="off"] .lumen-mote { animation: none; opacity: 0; }
+.lumen-vp[data-projector="off"] .lumen-pilot { animation: none; opacity: .1; }
+.lumen-vp[data-projector="off"] .lumen-lever { animation: none; transform: rotate(-32deg); }
+
+/* After the first click, power-on is immediate; the initial cinematic intro stays intact. */
+.lumen-vp[data-switch-used="true"][data-projector="on"] .lumen-screen {
+  animation: none;
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  filter: none;
+}
+.lumen-vp[data-switch-used="true"][data-projector="on"] .lumen-beam-wrap,
+.lumen-vp[data-switch-used="true"][data-projector="on"] .lumen-lensglow {
+  animation: none;
+  opacity: 1;
+  visibility: visible;
+}
+.lumen-vp[data-switch-used="true"][data-projector="on"] .lumen-beam,
+.lumen-vp[data-switch-used="true"][data-projector="on"] .lumen-beam-core { animation: none; opacity: 1; }
+.lumen-vp[data-switch-used="true"][data-projector="on"] .lumen-lever { animation: none; transform: rotate(28deg); }
+.lumen-vp[data-switch-used="true"][data-projector="on"] .lumen-pilot { animation: none; opacity: 1; }
 
 /* ─────────────────────────────────────────────────────
    KEYFRAMES

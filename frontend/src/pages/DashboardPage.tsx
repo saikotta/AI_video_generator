@@ -216,7 +216,7 @@ export default function DashboardPage({ user, onLogout }: Props) {
 
         <section className="gal" aria-labelledby="galTitle">
           <div className="gh"><h2 className="sf" id="galTitle">Your <em>creations</em></h2><span className="tag" id="gc">{projects.length} films</span></div>
-          <div className="grid" id="grid" aria-live="polite">
+          <div className="grid video-card-grid" id="grid" aria-live="polite">
             {projects.map(project => <GalleryCard key={project.id} project={project} onDetails={() => void openDetails(project.id)} onDownload={() => void handleDownload(project.id, project.topic)} />)}
             {!loadingProjects && projects.length === 0 && <div className="empty">{LENS}<p>Your archive awaits its first film</p></div>}
             {loadingProjects && <div className="empty"><p>Loading your films…</p></div>}
@@ -242,12 +242,12 @@ function GalleryCard({ project, onDetails, onDownload }: { project: ProjectRespo
   const title = (project.topic || 'Untitled').replace(/[.,;:!?]+$/, '').slice(0, 42)
   const date = project.created_at ? new Date(project.created_at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '—'
   return (
-    <div className="cw">
-      <div className="card">
-        <div className="post" role="img" aria-label={`${status.text}: ${title}`}>
+    <div className="cw video-card">
+      <div className="card video-card-shell">
+        <div className="post video-card-preview" role="img" aria-label={`${status.text}: ${title}`}>
           <span className={`badge ${status.className}`}>{status.text}</span>{LENS}
         </div>
-        <div className="stub">
+        <div className="stub video-card-info">
           <div className="ti">
             <b title={project.topic}>{title}</b>
             <small>{date} · {project.desired_duration_seconds}s · {project.aspect_ratio}</small>
