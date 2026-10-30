@@ -1,0 +1,33 @@
+{
+  "project_id": "77b28037-7425-4b16-bd33-1bf1d4181949",
+  "topic": "How to prepare a simple vegetable stir-fry",
+  "requested_duration_seconds": 20,
+  "overall_status": "FAILED",
+  "pipeline_error": "Groq API returned HTTP error status 400.",
+  "total_execution_time_seconds": 9.55,
+  "measured_narration_duration_total": 0.0,
+  "final_video_duration": null,
+  "script_text": "Heat a wok over high flame, add a splash of oil until it shimmers, then toss sliced carrots, bell peppers, broccoli florets, and snap peas, stirring rapidly. Sprinkle a pinch of salt, drizzle soy sauce, and cook until vegetables are crisp‑tender, releasing fragrant steam.",
+  "script_words": 44,
+  "stages_count": 2,
+  "stages_status": {
+    "script_generation": "completed",
+    "scene_splitting": "failed"
+  },
+  "stage_durations": {
+    "script_generation": 2.07,
+    "scene_splitting": 7.44
+  },
+  "num_scenes": 0,
+  "total_planned_shots": 0,
+  "total_sourced_shots": 0,
+  "total_missing_shots": 0,
+  "scenes_detail": [],
+  "video_assets": [],
+  "sfx_assets": [],
+  "voiceover_assets": [],
+  "final_video_path": null,
+  "video_metadata": {},
+  "extracted_keyframes": [],
+  "reference_media_hashes_match": true
+}

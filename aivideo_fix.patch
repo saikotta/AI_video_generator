@@ -1,0 +1,456 @@
+diff --git a/.env.example b/.env.example
+index 2c84d21..58ffb83 100644
+--- a/.env.example
++++ b/.env.example
+@@ -1,9 +1,22 @@
+-DATABASE_URL=postgresql+asyncpg://aivideo_user:aivideo_02@localhost:5432/aivideo_db
+-JWT_SECRET=super_secret_jwt_key_change_me_in_production_123456789
++DATABASE_URL=postgresql+asyncpg://your_db_user:your_db_password@localhost:5432/your_db_name
++JWT_SECRET=change_me_to_a_long_random_string
+ JWT_ALGORITHM=HS256
+ JWT_EXPIRE_MINUTES=1440
++
++# Script / scene / visual-spec generation: "groq" (cloud, default) or "ollama" (local)
++SCRIPT_PROVIDER=groq
++GROQ_API_KEY=your_groq_api_key_here
++GROQ_MODEL=openai/gpt-oss-120b
++# Only needed if SCRIPT_PROVIDER=ollama
+ OLLAMA_BASE_URL=http://localhost:11434
+ OLLAMA_MODEL=llama3.2
+-NARRATION_WPM=150
++
++NARRATION_WPM=130
++TTS_VOICE=en-US-ChristopherNeural
++
+ PEXELS_API_KEY=your_pexels_api_key_here
++FREESOUND_API_KEY=your_freesound_api_key_here
+ MEDIA_STORAGE_PATH=./media
++
++# "block" = stop for manual approval when footage can't be verified; "best_effort" = use best unverified clip
++UNCERTAIN_FOOTAGE_POLICY=block
+diff --git a/app/config.py b/app/config.py
+index bd2010d..5419acd 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -22,6 +22,12 @@ class Settings(BaseSettings):
+     ENABLE_SCRIPT_CACHE: bool = False
+     SCRIPT_PROVIDER: str = "groq"
+ 
++    # What to do when no candidate clip is verified for a shot:
++    #   "block"       - stop and wait for manual approval (strict, original behaviour)
++    #   "best_effort" - use the best-scoring unverified clip and record it as UNCERTAIN
++    #                   in the scene metadata so it can be reviewed later
++    UNCERTAIN_FOOTAGE_POLICY: str = "block"
++
+     model_config = SettingsConfigDict(
+         env_file=".env",
+         env_file_encoding="utf-8",
+diff --git a/app/services/pipeline_orchestrator.py b/app/services/pipeline_orchestrator.py
+index 45781d5..1472599 100644
+--- a/app/services/pipeline_orchestrator.py
++++ b/app/services/pipeline_orchestrator.py
+@@ -972,6 +972,7 @@ class VideoPipelineOrchestrator:
+                                     raise NoSuitableMediaFoundError(f"No candidate video clips returned for shot {s_idx}.")
+ 
+                                 # 2. Actual Video-Frame Verification Loop
++                                best_uncertain = None
+                                 for cand in candidates:
+                                     p_id = cand.metadata.get("pexels_id")
+ 
+@@ -1055,6 +1056,9 @@ class VideoPipelineOrchestrator:
+                                             f"Candidate {p_id} for Scene {order} Shot {s_idx} is UNCERTAIN: "
+                                             f"contact sheet saved to {cs_path}. Awaiting manual approval."
+                                         )
++                                        _score = float((cand.metadata or {}).get("semantic_score", 0.0) or 0.0)
++                                        if best_uncertain is None or _score > best_uncertain[3]:
++                                            best_uncertain = (cand, cand_f, current_vres, _score)
+                                     else:
+                                         logger.warning(
+                                             f"Candidate {p_id} for Scene {order} Shot {s_idx} REJECTED: {'; '.join(current_vres.contradictions)}"
+@@ -1066,8 +1070,29 @@ class VideoPipelineOrchestrator:
+                                                 pass
+ 
+                                 # CRITICAL ACCURACY RULE:
+-                                # Never automatically treat UNCERTAIN or MANUAL_REVIEW_REQUIRED as verified!
+-                                # Unapproved uncertain footage is NEVER sent to final assembly.
++                                # UNCERTAIN or MANUAL_REVIEW_REQUIRED footage is never treated as verified.
++                                # With UNCERTAIN_FOOTAGE_POLICY="block" (default) it is never sent to final
++                                # assembly. With "best_effort" the best unverified clip MAY be assembled,
++                                # but it is explicitly flagged unverified (unverified_best_effort=True,
++                                # is_visual_frame_verified=False) and stays in the pending-review registry.
++                                if (
++                                    verified_cand is None
++                                    and best_uncertain is not None
++                                    and str(settings.UNCERTAIN_FOOTAGE_POLICY).strip().lower() == "best_effort"
++                                ):
++                                    verified_cand, verified_file, v_res, _ = best_uncertain
++                                    v_res.is_visual_frame_verified = False
++                                    v_res.evidence.append(
++                                        "BEST-EFFORT: no clip was verified; this UNVERIFIED clip was used "
++                                        "because UNCERTAIN_FOOTAGE_POLICY=best_effort. Not approved."
++                                    )
++                                    used_video_ids.add(verified_cand.metadata.get("pexels_id"))
++                                    logger.warning(
++                                        f"Scene {order} Shot {s_idx}: no verified clip; using best UNVERIFIED candidate "
++                                        f"{verified_cand.metadata.get('pexels_id')} (UNCERTAIN_FOOTAGE_POLICY=best_effort). "
++                                        f"It is recorded as uncertain in the scene metadata and in the approval registry."
++                                    )
++
+                                 if verified_cand is None:
+                                     pending_shot_reviews = [
+                                         pr for pr in self.get_pending_approvals(project_id)
+@@ -1116,6 +1141,7 @@ class VideoPipelineOrchestrator:
+                                 "verification_evidence": v_res.evidence,
+                                 "evaluated_timestamps": v_res.evaluated_timestamps,
+                                 "is_visual_frame_verified": v_res.is_visual_frame_verified,
++                                "unverified_best_effort": v_res.status != VerificationStatus.ACCEPTED,
+                                 "recommended_strategy": v_res.recommended_strategy
+                             }
+                             await self._save_scene_asset(
+diff --git a/app/services/providers/groq_script_provider.py b/app/services/providers/groq_script_provider.py
+index 3b82b63..aa7103b 100644
+--- a/app/services/providers/groq_script_provider.py
++++ b/app/services/providers/groq_script_provider.py
+@@ -437,12 +437,17 @@ class GroqScriptProvider(ScriptProvider):
+     def _classify_topic(cls, topic: str) -> str:
+         t_lower = topic.lower()
+ 
+-        # 1. Historical topics (explicitly requesting history, origins, eras, civilizations)
++        # 1. Historical topics that EXPLICITLY ask for history (strong signals only).
++        # Weak era words such as "ancient" or "century" are handled after the
++        # science/cooking/technology checks, so "ancient seed germination" is science.
+         history_keywords = [
+-            "history", "historical", "ancient", "origin of", "origins of",
+-            "empire", "dynasty", "century", "civilization", "revolution",
+-            "medieval", "renaissance", "war of", "world war", "battle of",
+-            "antiquity", "archaeology", "historical origins"
++            "history", "historical", "origin of", "origins of",
++            "empire", "dynasty", "civilization", "revolution",
++            "war of", "world war", "battle of",
++            "archaeology", "historical origins"
++        ]
++        weak_history_keywords = [
++            "ancient", "century", "medieval", "renaissance", "antiquity"
+         ]
+         if any(re.search(r'\b' + re.escape(kw) + r'\b', t_lower) for kw in history_keywords):
+             return "history"
+@@ -484,6 +489,10 @@ class GroqScriptProvider(ScriptProvider):
+         if any(re.search(r'\b' + re.escape(kw) + r'\b', t_lower) for kw in tech_keywords):
+             return "technology"
+ 
++        # 4b. Weak history signals only win when no subject-matter category matched above
++        if any(re.search(r'\b' + re.escape(kw) + r'\b', t_lower) for kw in weak_history_keywords):
++            return "history"
++
+         # 5. Creative storytelling / narrative fiction
+         story_keywords = [
+             "story", "stories", "tale", "tales", "fable", "fables", "adventure",
+@@ -575,20 +584,21 @@ class GroqScriptProvider(ScriptProvider):
+             min_target_words = int(target_words * 0.90)
+ 
+         prompt = (
+-            f"You are a master documentary scriptwriter crafting a rich, immersive spoken narration.\n"
++            f"You are a clear, practical scriptwriter writing plain spoken narration for a short explainer video.\n"
+             f"Write a full narration script for a video about: \"{topic}\".\n\n"
+             f"TARGET DURATION: {desired_duration_seconds} seconds.\n"
+             f"TARGET LENGTH: AT LEAST {target_words} WORDS (approx. {target_words} to {max_target_words} words).\n\n"
+             f"CONTENT INSTRUCTIONS:\n"
+             f"{content_instructions}\n"
+-            f"- It is CRITICAL that the text is detailed and lengthy enough to reach the target word count of AT LEAST {target_words} words.\n\n"
++            f"- The text must be long enough to reach the target word count of AT LEAST {target_words} words.\n\n"
+             f"STRICT FORMATTING RULES:\n"
+             f"1. Return ONLY the spoken narration text. Do not include intro/outro conversational remarks.\n"
+             f"2. Do NOT include any titles, headers, or section names.\n"
+             f"3. Do NOT include any bullet points or numbered lists.\n"
+             f"4. Do NOT include any Markdown formatting.\n"
+             f"5. Do NOT include any stage directions, narrator tags, or visual cues (e.g. no '[Music]', '(Narrator:)', 'Scene 1:').\n"
+-            f"6. Make the narration continuous, naturally spoken, and rich in detail to fulfill the {target_words} words target.\n\n"
++            f"6. Make the narration continuous and naturally spoken. Reach the word target by adding concrete facts, steps and cause-and-effect, never decorative language.\n"
++            f"7. Write in direct, concrete sentences about what happens and why. Do NOT write poetic or ornate prose, do NOT use flowery adjectives or metaphors (e.g. 'tender', 'whispers', 'dances'), and do NOT describe camera views or how things look on screen.\n\n"
+             f"Spoken Narration Script:"
+         )
+ 
+diff --git a/app/services/providers/ollama_script_provider.py b/app/services/providers/ollama_script_provider.py
+index 95e03e9..1924c43 100644
+--- a/app/services/providers/ollama_script_provider.py
++++ b/app/services/providers/ollama_script_provider.py
+@@ -210,20 +210,21 @@ class OllamaScriptProvider(ScriptProvider):
+         
+         # Enhanced initial prompt emphasizing target length and thorough content
+         prompt = (
+-            f"You are a master documentary scriptwriter crafting a rich, immersive spoken narration.\n"
++            f"You are a clear, practical scriptwriter writing plain spoken narration for a short explainer video.\n"
+             f"Write a full narration script for a video about: \"{topic}\".\n\n"
+             f"TARGET DURATION: {desired_duration_seconds} seconds.\n"
+             f"TARGET LENGTH: AT LEAST {target_words} WORDS (approx. {target_words} to {int(target_words * 1.15)} words).\n\n"
+             f"CONTENT INSTRUCTIONS:\n"
+             f"- Provide a comprehensive, detailed story covering origins, key historical moments, cultural significance, anecdotes, major developments, and a strong conclusion.\n"
+-            f"- It is CRITICAL that the text is detailed and lengthy enough to reach the target word count of AT LEAST {target_words} words.\n\n"
++            f"- The text must be long enough to reach the target word count of AT LEAST {target_words} words.\n\n"
+             f"STRICT FORMATTING RULES:\n"
+             f"1. Return ONLY the spoken narration text. Do not include intro/outro conversational remarks.\n"
+             f"2. Do NOT include any titles, headers, or section names.\n"
+             f"3. Do NOT include any bullet points or numbered lists.\n"
+             f"4. Do NOT include any Markdown formatting.\n"
+             f"5. Do NOT include any stage directions, narrator tags, or visual cues (e.g. no '[Music]', '(Narrator:)', 'Scene 1:').\n"
+-            f"6. Make the narration continuous, naturally spoken, and rich in detail to fulfill the {target_words} words target.\n\n"
++            f"6. Make the narration continuous and naturally spoken. Reach the word target by adding concrete facts, steps and cause-and-effect, never decorative language.\n"
++            f"7. Write in direct, concrete sentences about what happens and why. Do NOT write poetic or ornate prose, do NOT use flowery adjectives or metaphors (e.g. 'tender', 'whispers', 'dances'), and do NOT describe camera views or how things look on screen.\n\n"
+             f"Spoken Narration Script:"
+         )
+ 
+diff --git a/app/services/providers/pexels_video_provider.py b/app/services/providers/pexels_video_provider.py
+index 4e2b58d..76e71d6 100644
+--- a/app/services/providers/pexels_video_provider.py
++++ b/app/services/providers/pexels_video_provider.py
+@@ -822,7 +822,10 @@ class PexelsVideoProvider(StockMediaProvider):
+             "score": round(total_score, 2),
+             "technical_score": round(technical_score, 2),
+             "semantic_score": round(semantic_score, 2),
+-            "semantic_reasons": semantic_reasons
++            "semantic_reasons": semantic_reasons,
++            # The clip's own descriptive text (URL slug, title, tags). This is the only
++            # text the visual verifier may treat as evidence about what the clip shows.
++            "clip_text": self._extract_video_metadata_text(video),
+         }
+ 
+     async def search_media_candidates(
+@@ -922,6 +925,7 @@ class PexelsVideoProvider(StockMediaProvider):
+                             "semantic_score": cand["semantic_score"],
+                             "technical_score": cand["technical_score"],
+                             "semantic_reasons": cand["semantic_reasons"],
++                            "clip_text": cand.get("clip_text", ""),
+                             "global_candidates_evaluated": len(candidates_list)
+                         }
+                     ))
+@@ -985,7 +989,8 @@ class PexelsVideoProvider(StockMediaProvider):
+                                 "score": cand["score"],
+                                 "semantic_score": cand["semantic_score"],
+                                 "technical_score": cand["technical_score"],
+-                                "semantic_reasons": cand["semantic_reasons"]
++                                "semantic_reasons": cand["semantic_reasons"],
++                                "clip_text": cand.get("clip_text", "")
+                             }
+                         ))
+                     return results
+diff --git a/app/services/video_assembly.py b/app/services/video_assembly.py
+index d26999d..ef62a5e 100644
+--- a/app/services/video_assembly.py
++++ b/app/services/video_assembly.py
+@@ -20,7 +20,11 @@ from moviepy import (
+     afx
+ )
+ 
+-def ensure_resampled_audio(audio_path: str, target_dir: str = "c:/AiVideoGenerator/media/audio_resampled") -> str:
++# Portable default (no machine-specific drive paths). The pipeline always passes a
++# per-project directory; this is only a fallback for standalone use.
++DEFAULT_RESAMPLED_DIR = os.path.join(os.getenv("MEDIA_STORAGE_PATH", "./media"), "audio_resampled")
++
++def ensure_resampled_audio(audio_path: str, target_dir: str = DEFAULT_RESAMPLED_DIR) -> str:
+     """
+     Resample input audio file to 44100 Hz stereo 16-bit PCM WAV using PyAV.
+     Preserves real-world pitch and spoken duration exactly.
+@@ -29,7 +33,13 @@ def ensure_resampled_audio(audio_path: str, target_dir: str = "c:/AiVideoGenerat
+     filename = os.path.splitext(os.path.basename(audio_path))[0] + "_44k.wav"
+     output_wav = os.path.join(target_dir, filename)
+ 
+-    if os.path.exists(output_wav) and os.path.getsize(output_wav) > 1000:
++    # Reuse the cached WAV only if it is not older than its source (avoids stale audio
++    # when a scene's narration is regenerated under the same filename).
++    if (
++        os.path.exists(output_wav)
++        and os.path.getsize(output_wav) > 1000
++        and os.path.getmtime(output_wav) >= os.path.getmtime(audio_path)
++    ):
+         return output_wav
+ 
+     in_container = av.open(audio_path)
+@@ -694,7 +704,7 @@ def mix_scene_audio_pcm(
+     ambient_audio_path: Optional[str],
+     exact_duration: float,
+     scene_order: int,
+-    target_dir: str = "c:/AiVideoGenerator/media/audio_resampled"
++    target_dir: str = DEFAULT_RESAMPLED_DIR
+ ) -> str:
+     """
+     Direct PCM numpy audio stream mixing for three independent layers:
+@@ -936,7 +946,7 @@ def assemble_video(
+     if not scenes:
+         raise ValueError("Cannot assemble video with empty scenes list.")
+ 
+-    target_resampled_dir = resampled_dir or "c:/AiVideoGenerator/media/audio_resampled"
++    target_resampled_dir = resampled_dir or DEFAULT_RESAMPLED_DIR
+ 
+     sorted_scenes = sorted(scenes, key=lambda x: x["scene_order"])
+     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+diff --git a/app/services/visual_verification.py b/app/services/visual_verification.py
+index c438d3b..40cf8ab 100644
+--- a/app/services/visual_verification.py
++++ b/app/services/visual_verification.py
+@@ -335,16 +335,16 @@ class HeuristicVisualVerifier:
+         explicit_exclusions = [str(e).strip().lower() for e in (shot_requirements.get("explicit_exclusions") or []) if e]
+ 
+         candidate_meta = candidate_metadata or {}
+-        cand_text = " ".join([
+-            str(candidate_meta.get("keyword_used") or ""),
+-            str(candidate_meta.get("search_query") or ""),
+-            str(candidate_meta.get("query") or ""),
+-            str(candidate_meta.get("photographer") or ""),
+-            str(candidate_meta.get("source_url") or ""),
+-            " ".join(candidate_meta.get("semantic_reasons") or []),
++        # EVIDENCE RULE: only text that describes the clip itself may count as evidence.
++        # The search query (keyword_used / search_query / query) is how the clip was FOUND,
++        # so matching the requirements against it is circular and proves nothing. The
++        # photographer name and the provider's own score reasons are likewise not evidence.
++        # Those fields are kept in the metadata for logging only.
++        cand_text = re.sub(r'[^\w\s]', ' ', " ".join([
++            str(candidate_meta.get("clip_text") or ""),
+             str(candidate_meta.get("title") or ""),
+             str(candidate_meta.get("tags") or "")
+-        ]).lower()
++        ]).lower())
+ 
+         # 1. Frame extraction inspection
+         frame_arrays = [arr for _, _, arr in frames]
+@@ -405,6 +405,25 @@ class HeuristicVisualVerifier:
+             else:
+                 uncertainties.append(f"Required object '{req_obj}' not verified in candidate description")
+ 
++        # Action verification (independent of the subject): does the clip's own text mention
++        # the required visible action? Light stemming so "pouring" matches "pour"/"pours".
++        action_stop = {"the", "and", "with", "into", "from", "that", "this", "onto", "over", "while"}
++        def _stem(w: str) -> str:
++            return re.sub(r'(ing|ed|es|s)$', '', w) if len(w) > 4 else w
++        cand_words = set(w for w in re.split(r'\W+', cand_text) if w)
++        subject_stems = {_stem(w) for w in subject_tokens}
++        # A word that is already part of the subject must not also count as action evidence
++        action_tokens = [
++            w for w in re.split(r'\W+', req_action)
++            if len(w) > 3 and w not in action_stop and _stem(w) not in subject_stems
++        ]
++        matched_actions = [
++            w for w in action_tokens
++            if len(_stem(w)) >= 3 and any(cw.startswith(_stem(w)) for cw in cand_words)
++        ]
++        if matched_actions:
++            confirmed_matches.append(f"Action terms matched: {matched_actions}")
++
+         # 4. Setting verification
+         setting_tokens = [w for w in re.split(r'\W+', req_setting) if len(w) > 2 and w not in ("and", "the", "with", "for", "from")]
+         matched_settings = [w for w in setting_tokens if re.search(r'\b' + re.escape(w) + r'\b', cand_text)]
+@@ -447,27 +466,20 @@ class HeuristicVisualVerifier:
+             confidence = 0.45
+             evidence.append(f"UNCERTAIN candidate: primary subject '{req_subject}' not confirmed ({'; '.join(uncertainties)})")
+         elif len(confirmed_matches) >= 2:
++            # Subject confirmed AND at least one independent corroboration
++            # (action, setting or required object) from the clip's own text.
+             status = VerificationStatus.ACCEPTED
+-            confidence = min(0.95, 0.70 + (0.05 * len(confirmed_matches)))
++            confidence = min(0.90, 0.65 + (0.05 * len(confirmed_matches)))
+             evidence.append(f"ACCEPTED candidate: verified matches for {'; '.join(confirmed_matches)}")
+-        elif len(confirmed_matches) == 1:
+-            status = VerificationStatus.ACCEPTED
+-            confidence = 0.75
+-            evidence.append(f"ACCEPTED candidate with confirmed match: {confirmed_matches[0]}")
+-        elif candidate_meta.get("semantic_score", 0.0) >= 40.0:
+-            status = VerificationStatus.ACCEPTED
+-            confidence = 0.70
+-            confirmed_matches.append("Upstream provider verified semantic alignment")
+-            evidence.append("ACCEPTED candidate based on strong upstream alignment without contradictions")
+-        elif not cand_text.strip() and motion_delta >= 0.0:
+-            status = VerificationStatus.ACCEPTED
+-            confidence = 0.70
+-            confirmed_matches.append("Decoded video stream validated")
+-            evidence.append("ACCEPTED candidate based on valid decoded video stream")
+         else:
++            # Subject alone is not enough: a bare noun ("seeds", "hands") appears in
++            # many unrelated clips. Needs corroboration or a human decision.
+             status = VerificationStatus.UNCERTAIN
+             confidence = 0.50
+-            evidence.append("UNCERTAIN candidate: balanced evidence requiring review")
++            evidence.append(
++                f"UNCERTAIN candidate: subject confirmed but no independent action/setting/object "
++                f"evidence in the clip's own description ({'; '.join(uncertainties)})"
++            )
+ 
+         rec_strategy = "diagram_or_motion_graphic" if feasibility == ConceptFeasibility.CONCEPTUAL_ABSTRACT else None
+ 
+diff --git a/test_patch_regression.py b/test_patch_regression.py
+new file mode 100644
+index 0000000..d16325a
+--- /dev/null
++++ b/test_patch_regression.py
+@@ -0,0 +1,73 @@
++"""Regression tests for the verification / classifier / prompt / path fixes.
++Run:  python test_patch_regression.py     (no pytest needed)
++"""
++import os, sys, types
++os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://u:p@localhost/db")
++try:
++    import av  # noqa: F401
++except Exception:                      # verifier tests don't decode video
++    sys.modules["av"] = types.ModuleType("av")
++
++import numpy as np
++from PIL import Image
++from app.services.visual_verification import HeuristicVisualVerifier as H, VerificationStatus as S
++
++def moving_frames():
++    rng = np.random.default_rng(0)
++    out = []
++    for t in (0.5, 1.0, 1.5):
++        arr = rng.integers(60, 200, (64, 64, 3), dtype=np.uint8)
++        out.append((t, Image.fromarray(arr), arr))
++    return out
++
++REQ = {"primary_subject": "wheat grains", "required_visible_action": "pouring grain",
++       "required_setting": "barn", "required_objects": ["hands"], "explicit_exclusions": []}
++F = moving_frames()
++fails = []
++def check(name, cond):
++    print(("PASS " if cond else "FAIL ") + name)
++    if not cond: fails.append(name)
++
++# --- verifier: the circular-evidence bug ---
++check("search query alone can no longer ACCEPT a clip",
++      H.evaluate(F, REQ, {"keyword_used": "wheat grains pouring", "search_query": "wheat grains pouring"}).status != S.ACCEPTED)
++check("high semantic_score with no clip text is not ACCEPTED",
++      H.evaluate(F, REQ, {"semantic_score": 99.0}).status != S.ACCEPTED)
++check("photographer name is not evidence",
++      H.evaluate(F, REQ, {"photographer": "wheat grains pouring"}).status != S.ACCEPTED)
++check("subject-only clip text is UNCERTAIN (needs corroboration)",
++      H.evaluate(F, REQ, {"clip_text": "wheat grains on a table"}).status == S.UNCERTAIN)
++check("subject + action in clip's own text is ACCEPTED",
++      H.evaluate(F, REQ, {"clip_text": "farmer pouring wheat grains from hands"}).status == S.ACCEPTED)
++check("subject + setting in clip's own text is ACCEPTED",
++      H.evaluate(F, REQ, {"clip_text": "wheat grains stored in old barn"}).status == S.ACCEPTED)
++check("unrelated clip text is not ACCEPTED",
++      H.evaluate(F, REQ, {"clip_text": "city traffic at night"}).status != S.ACCEPTED)
++check("explicit exclusion in clip text is REJECTED",
++      H.evaluate(F, {**REQ, "explicit_exclusions": ["bathtub"]}, {"clip_text": "wheat grains pouring bathtub"}).status == S.REJECTED)
++
++# --- classifier ---
++from app.services.providers.groq_script_provider import GroqScriptProvider as G
++c = G._classify_topic
++check("'ancient seed germination' -> science (was history)", c("ancient seed germination") == "science")
++check("'history of coffee' still -> history", c("the history of coffee") == "history")
++check("'ancient Rome' (no other category) -> history", c("ancient Rome") == "history")
++check("'how coffee is roasted' -> cooking", c("how coffee is roasted") == "cooking")
++
++# --- prompts ---
++import inspect
++src = inspect.getsource(G.generate_script)
++check("script prompt no longer asks for 'rich, immersive' prose", "rich, immersive" not in src and "rich in detail" not in src)
++
++# --- portability ---
++import re
++asm = open("app/services/video_assembly.py", encoding="utf-8").read()
++check("no hard-coded c:/AiVideoGenerator paths in video_assembly", not re.search(r"[cC]:[/\\\\]AiVideoGenerator", asm))
++
++orch = open("app/services/pipeline_orchestrator.py", encoding="utf-8").read()
++check("best_effort clips are flagged unverified, not frame-verified",
++      "v_res.is_visual_frame_verified = False" in orch and '"unverified_best_effort"' in orch)
++check("orchestrator comment no longer claims uncertain footage never reaches assembly",
++      "is NEVER sent to final assembly" not in orch)
++
++print("\n%d failed" % len(fails)); sys.exit(1 if fails else 0)

@@ -1,0 +1,545 @@
+diff --git a/app/config.py b/app/config.py
+index 5419acd..e8279d1 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -28,6 +28,11 @@ class Settings(BaseSettings):
+     #                   in the scene metadata so it can be reviewed later
+     UNCERTAIN_FOOTAGE_POLICY: str = "block"
+ 
++    # Shots about abstract/internal processes (enzymes, cellular respiration, ...) cannot be
++    # filmed truthfully with stock footage. When True the pipeline renders a title card for
++    # them instead of stopping or using unrelated footage.
++    ABSTRACT_SHOT_CARD_ENABLED: bool = True
++
+     model_config = SettingsConfigDict(
+         env_file=".env",
+         env_file_encoding="utf-8",
+diff --git a/app/schemas/visual_spec.py b/app/schemas/visual_spec.py
+index fd8cbee..d0c0ca3 100644
+--- a/app/schemas/visual_spec.py
++++ b/app/schemas/visual_spec.py
+@@ -1,3 +1,4 @@
++import re
+ import math
+ from typing import List, Optional, Literal, Dict, Any, Union
+ from pydantic import BaseModel, Field, field_validator, model_validator
+@@ -192,49 +193,10 @@ class ShotSpecificationSchema(BaseModel):
+         else:
+             self.expected_duration = calc_duration
+ 
+-        # Scientific & Biological Accuracy Validation
+-        subj_lower = self.primary_subject.lower()
+-        act_lower = self.required_visible_action.lower()
+-        combined = f"{subj_lower} {act_lower}"
+-
+-        # 1. Root & Shoot Direction (Gravitropism vs Phototropism)
+-        if any(term in combined for term in ("root", "radicle", "taproot", "root tip")):
+-            upward_terms = ("upward", "upwards", "towards the sky", "towards the surface", "pointing upward", "growing upward", "elongates upward")
+-            for ut in upward_terms:
+-                if ut in act_lower or ut in subj_lower:
+-                    raise ValueError(
+-                        f"Scientific contradiction: plant roots exhibit positive gravitropism and grow downward "
+-                        f"into soil/substrate. Contradictory upward direction found: '{ut}' in '{self.required_visible_action}'."
+-                    )
+-
+-        if any(term in combined for term in ("shoot", "stem", "plumule", "hypocotyl")):
+-            downward_terms = ("downward into soil", "downward into earth", "deep underground", "growing downward")
+-            for dt in downward_terms:
+-                if dt in act_lower:
+-                    raise ValueError(
+-                        f"Scientific contradiction: plant shoots exhibit phototropism and grow upward toward light. "
+-                        f"Contradictory downward direction found: '{dt}' in '{self.required_visible_action}'."
+-                    )
+-
+-        # 2. Seed Developmental Stage Integrity
+-        if any(term in combined for term in ("dry seed", "dormant seed", "unsprouted seed", "seed imbibition", "seed water absorption")):
+-            contradictory_stages = ("seedling", "leafy", "green leaves", "grown plant", "mature sprout", "nursery tray")
+-            for stage in contradictory_stages:
+-                if stage in combined:
+-                    raise ValueError(
+-                        f"Scientific contradiction: dry/dormant seed cannot be described as an already grown "
+-                        f"stage ('{stage}')."
+-                    )
+-
+-        # 3. Biochemical Process Substitution Prevention
+-        if any(term in combined for term in ("enzyme", "enzymes", "enzymatic", "starch breakdown", "cellular respiration")):
+-            unrelated_substitutions = ("drinking glass", "pouring into a glass", "pouring into a bowl", "glass of water", "kitchen bowl")
+-            for sub in unrelated_substitutions:
+-                if sub in act_lower:
+-                    raise ValueError(
+-                        f"Scientific contradiction: cannot substitute domestic/kitchen action ('{sub}') "
+-                        f"for an internal biochemical process."
+-                    )
++        # Scientific & biological accuracy (clause-level, whole-word matching)
++        _problems = find_scientific_contradictions(self.primary_subject, self.required_visible_action)
++        if _problems:
++            raise ValueError("Scientific contradiction: " + "; ".join(_problems))
+ 
+         return self
+ 
+@@ -338,40 +300,10 @@ class VisualSpecificationSchema(BaseModel):
+                             f"which is out of range for action_timeline with {len(self.action_timeline)} events."
+                         )
+ 
+-        # Scientific Accuracy Validation at Scene Level
+-        prompt_lower = self.visual_prompt.lower()
+-        subj_lower = (self.primary_subject or "").lower()
+-        combined = f"{subj_lower} {prompt_lower}"
+-
+-        # 1. Root Direction
+-        if any(term in combined for term in ("root", "radicle", "taproot", "root tip")):
+-            upward_terms = ("upward", "upwards", "towards the sky", "towards the surface", "pointing upward", "growing upward", "elongates upward")
+-            for ut in upward_terms:
+-                if ut in prompt_lower or ut in subj_lower:
+-                    raise ValueError(
+-                        f"Scientific contradiction: plant roots grow downward into substrate (positive gravitropism), "
+-                        f"not upward. Contradictory upward motion found: '{ut}'."
+-                    )
+-
+-        # 2. Seed Developmental Stage Integrity
+-        if any(term in combined for term in ("dry seed", "dormant seed", "unsprouted seed", "seed imbibition", "seed water absorption")):
+-            contradictory_stages = ("seedling", "leafy", "green leaves", "grown plant", "mature sprout", "nursery tray")
+-            for stage in contradictory_stages:
+-                if stage in combined:
+-                    raise ValueError(
+-                        f"Scientific contradiction: dry/dormant seed cannot be described as a leafy seedling "
+-                        f"or grown plant ('{stage}')."
+-                    )
+-
+-        # 3. Biochemical Process Substitution Prevention
+-        if any(term in combined for term in ("enzyme", "enzymes", "enzymatic", "starch breakdown", "cellular respiration")):
+-            unrelated_substitutions = ("drinking glass", "pouring into a glass", "pouring into a bowl", "glass of water", "kitchen bowl")
+-            for sub in unrelated_substitutions:
+-                if sub in prompt_lower:
+-                    raise ValueError(
+-                        f"Scientific contradiction: cannot substitute kitchen action ('{sub}') "
+-                        f"for internal biochemical process."
+-                    )
++        # Scientific & biological accuracy at scene level (clause-level, whole-word matching)
++        _problems = find_scientific_contradictions(self.primary_subject or "", self.visual_prompt)
++        if _problems:
++            raise ValueError("Scientific contradiction: " + "; ".join(_problems))
+ 
+         return self
+ 
+@@ -569,3 +501,71 @@ def validate_action_timeline_timing(
+ 
+     return validated
+ 
++
++# ---------------------------------------------------------------------------
++# Neutral placeholder used when a single-action scene has no real setting
++# ---------------------------------------------------------------------------
++PLACEHOLDER_SETTING = "appropriate setting"
++
++
++# ---------------------------------------------------------------------------
++# Scientific-accuracy checks used by the schema validators above.
++# Whole-word, clause-level matching so correct sentences are not rejected:
++#   "Roots anchor in soil while the shoot grows upward"  -> fine
++#   "The root system grows downward"                      -> fine ("system" is not "stem")
++#   "Beetroot leaves growing upward"                      -> fine ("beetroot" is not "root")
++#   "Root tip elongates upward from soil"                 -> contradiction
++# ---------------------------------------------------------------------------
++_ROOT_RE = re.compile(r"\b(?:roots?|radicles?|taproots?)\b")
++_SHOOT_RE = re.compile(r"\b(?:shoots?|stems?|plumules?|hypocotyls?|epicotyls?)\b")
++_UP_RE = re.compile(r"\b(?:upwards?|(?:towards?) the (?:sky|surface|light))\b")
++_SHOOT_DOWN_RE = re.compile(r"\bdownwards? into (?:the )?(?:soil|earth|ground)\b|\bgrowing downwards?\b|\bdeep underground\b")
++# Words showing the clause is about something other than the root's own growth direction
++_NOT_GROWTH_RE = re.compile(
++    r"\b(?:camera|tilts?|tilting|pans?|panning|zooms?|vegetables?|crops?|market|stall|"
++    r"water|sap|nutrients?|moisture|travels?|transport\w*|flows?|rises?|rising|"
++    r"shoots?|stems?|leaf|leaves|sprouts?|seedlings?)\b"
++)
++_DRY_SEED_RE = re.compile(r"\b(?:dry|dormant|unsprouted) seeds?\b|\bseed imbibition\b|\bseed water absorption\b")
++_GROWN_STAGE_RE = re.compile(r"\b(?:seedlings?|leafy|green leaves|grown plant|mature sprout|nursery trays?)\b")
++_STAGE_TRANSITION_RE = re.compile(r"\b(?:into|becomes?|before|until|later|eventually|after)\b")
++_ENZYME_RE = re.compile(r"\b(?:enzymes?|enzymatic|starch breakdown|cellular respiration)\b")
++_KITCHEN_SUBSTITUTES = ("drinking glass", "pouring into a glass", "pouring into a bowl", "glass of water", "kitchen bowl")
++_CLAUSE_SPLIT_RE = re.compile(r"[.;:!?\n]|,|\bwhile\b|\bas\b|\bthen\b|\bwhereas\b|\bmeanwhile\b|\bbut\b")
++
++
++def find_scientific_contradictions(subject: str, text: str) -> List[str]:
++    """Return human-readable contradictions found in a shot/scene description (empty list = fine)."""
++    subj = (subject or "").lower().strip()
++    body = (text or "").lower().strip()
++    problems: List[str] = []
++    subject_is_root = bool(_ROOT_RE.search(subj)) and not _SHOOT_RE.search(subj)
++    subject_is_shoot = bool(_SHOOT_RE.search(subj)) and not _ROOT_RE.search(subj)
++    subject_dry_seed = bool(_DRY_SEED_RE.search(subj))
++
++    for clause in _CLAUSE_SPLIT_RE.split(body):
++        clause = clause.strip()
++        if not clause:
++            continue
++        # Roots must not be described growing upward
++        if (subject_is_root or _ROOT_RE.search(clause)) and _UP_RE.search(clause) and not _NOT_GROWTH_RE.search(clause):
++            problems.append(
++                f"plant roots grow downward into soil (positive gravitropism); upward direction found in '{clause}'"
++            )
++        # Shoots must not be described growing down into the soil
++        if (subject_is_shoot or _SHOOT_RE.search(clause)) and not _ROOT_RE.search(clause) and _SHOOT_DOWN_RE.search(clause):
++            problems.append(
++                f"plant shoots grow upward toward light; downward direction found in '{clause}'"
++            )
++        # A dry / dormant seed must not be described as an already grown seedling
++        if (subject_dry_seed or _DRY_SEED_RE.search(clause)) and _GROWN_STAGE_RE.search(clause) \
++                and not _STAGE_TRANSITION_RE.search(clause):
++            problems.append(f"a dry/dormant seed cannot be described as an already grown stage in '{clause}'")
++
++    # Internal biochemistry must not be replaced by a kitchen action
++    if _ENZYME_RE.search(f"{subj} {body}"):
++        for sub in _KITCHEN_SUBSTITUTES:
++            if sub in body:
++                problems.append(f"cannot substitute the kitchen action '{sub}' for an internal biochemical process")
++                break
++    return problems
+diff --git a/app/services/info_card.py b/app/services/info_card.py
+new file mode 100644
+index 0000000..8c77af8
+--- /dev/null
++++ b/app/services/info_card.py
+@@ -0,0 +1,74 @@
++"""
++Title-card clips for shots that stock footage cannot depict truthfully
++(e.g. internal biochemical processes such as enzymes breaking down starch).
++
++Rendering an honest card is better than substituting unrelated footage
++(like water pouring into a kitchen glass).
++"""
++import os
++import subprocess
++import textwrap
++
++from PIL import Image, ImageDraw, ImageFont
++
++_FONT_CANDIDATES = ("arialbd.ttf", "arial.ttf", "segoeui.ttf", "DejaVuSans-Bold.ttf", "DejaVuSans.ttf",
++                    "LiberationSans-Bold.ttf")
++
++
++def _load_font(size: int):
++    for name in _FONT_CANDIDATES:
++        try:
++            return ImageFont.truetype(name, size)
++        except Exception:
++            continue
++    return ImageFont.load_default()
++
++
++def _ffmpeg_exe() -> str:
++    try:
++        import imageio_ffmpeg
++        return imageio_ffmpeg.get_ffmpeg_exe()
++    except Exception:
++        return "ffmpeg"
++
++
++def render_card_image(heading: str, size=(1280, 720)) -> Image.Image:
++    w, h = size
++    img = Image.new("RGB", size)
++    px = img.load()
++    for y in range(h):  # soft vertical gradient
++        t = y / max(1, h - 1)
++        color = (int(14 + 12 * t), int(32 + 26 * t), int(52 + 34 * t))
++        for x in range(w):
++            px[x, y] = color
++    draw = ImageDraw.Draw(img)
++
++    label_font = _load_font(28)
++    draw.text((w // 2, 150), "KEY IDEA", font=label_font, fill=(130, 190, 230), anchor="mm")
++    draw.rectangle([w // 2 - 60, 178, w // 2 + 60, 182], fill=(80, 150, 200))
++
++    text = " ".join((heading or "").split())[:140] or "Key idea"
++    head_font = _load_font(52)
++    lines = textwrap.wrap(text, width=30) or [text]
++    line_h = 70
++    y0 = h // 2 - (len(lines) * line_h) // 2 + 10
++    for i, line in enumerate(lines[:4]):
++        draw.text((w // 2, y0 + i * line_h), line, font=head_font, fill=(240, 246, 250), anchor="mm")
++    return img
++
++
++def render_info_card(heading: str, out_path: str, duration_seconds: float, fps: int = 24,
++                     size=(1280, 720)) -> str:
++    """Render a still title card to an H.264 MP4 of the given duration. Returns out_path."""
++    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
++    png_path = os.path.splitext(out_path)[0] + ".png"
++    render_card_image(heading, size).save(png_path)
++    cmd = [
++        _ffmpeg_exe(), "-y", "-loglevel", "error",
++        "-loop", "1", "-framerate", str(fps), "-i", png_path,
++        "-t", f"{max(0.5, float(duration_seconds)):.3f}",
++        "-c:v", "libx264", "-tune", "stillimage", "-pix_fmt", "yuv420p", "-r", str(fps), "-an",
++        out_path,
++    ]
++    subprocess.run(cmd, check=True)
++    return out_path
+diff --git a/app/services/pipeline_orchestrator.py b/app/services/pipeline_orchestrator.py
+index 26d93a3..2d27544 100644
+--- a/app/services/pipeline_orchestrator.py
++++ b/app/services/pipeline_orchestrator.py
+@@ -22,7 +22,8 @@ from app.models.scene_asset import SceneAsset
+ from app.models.pipeline_job import PipelineJob
+ 
+ from app.schemas.media import MediaAssetSchema
+-from app.schemas.visual_spec import validate_action_timeline_timing, reconcile_shot_plan_timing
++from app.schemas.visual_spec import validate_action_timeline_timing, reconcile_shot_plan_timing, PLACEHOLDER_SETTING
++from app.services.info_card import render_info_card
+ from app.services.providers.base import ScriptProvider
+ from app.services.providers.exceptions import (
+     StockMediaError,
+@@ -975,7 +976,10 @@ class VideoPipelineOrchestrator:
+                             "visual_prompt": r_shot.get("required_visible_action", ""),
+                             "required_action": r_shot.get("required_visible_action", ""),
+                             "primary_subject": r_shot.get("primary_subject", ""),
+-                            "required_setting": r_shot.get("required_setting", ""),
++                            "required_setting": (
++                                "" if r_shot.get("required_setting") == PLACEHOLDER_SETTING
++                                else r_shot.get("required_setting", "")
++                            ),
+                             "visual_state": r_shot.get("visual_state", ""),
+                             "camera_framing": r_shot.get("camera_framing", ""),
+                             "required_objects": r_shot.get("required_objects") or [],
+@@ -1159,6 +1163,57 @@ class VideoPipelineOrchestrator:
+                                         f"It is recorded as uncertain in the scene metadata and in the approval registry."
+                                     )
+ 
++                                if verified_cand is None and settings.ABSTRACT_SHOT_CARD_ENABLED:
++                                    _feas, _feas_msg = ConceptClassifier.classify_feasibility(
++                                        shot_ctx.get("required_action", ""),
++                                        shot_ctx.get("primary_subject", ""),
++                                        shot_ctx.get("visual_prompt", ""),
++                                    )
++                                    if _feas == ConceptFeasibility.CONCEPTUAL_ABSTRACT:
++                                        # Stock footage cannot show this truthfully: render an honest title card
++                                        card_path = os.path.join(clips_dir, f"scene_{order}_shot_{s_idx}_card.mp4")
++                                        render_info_card(
++                                            heading=sc.get("scene_text", "") or str(shot_ctx.get("primary_subject", "")),
++                                            out_path=card_path,
++                                            duration_seconds=float(r_shot["duration_seconds"]) + 1.0,
++                                        )
++                                        sc["requires_animation"] = True
++                                        sc["recommended_strategy"] = "diagram_or_motion_graphic"
++                                        sc["feasibility_reason"] = _feas_msg
++                                        card_meta = {
++                                            "shot_index": s_idx,
++                                            "allocated_frames": r_shot["allocated_frames"],
++                                            "start_frame": r_shot["start_frame"],
++                                            "end_frame": r_shot["end_frame"],
++                                            "start_seconds": r_shot["start_seconds"],
++                                            "end_seconds": r_shot["end_seconds"],
++                                            "duration_seconds": r_shot["duration_seconds"],
++                                            "required_visible_action": r_shot.get("required_visible_action"),
++                                            "primary_subject": r_shot.get("primary_subject"),
++                                            "verification_status": "not_applicable_generated_card",
++                                            "is_visual_frame_verified": False,
++                                            "unverified_best_effort": False,
++                                            "generated_info_card": True,
++                                            "feasibility_reason": _feas_msg,
++                                            "recommended_strategy": "diagram_or_motion_graphic",
++                                        }
++                                        await self._save_scene_asset(
++                                            scene_id=sc["id"],
++                                            asset_type=AssetType.VIDEO,
++                                            provider_name="generated_card",
++                                            local_path=card_path,
++                                            source_url=None,
++                                            duration_seconds=s_dur,
++                                            metadata=card_meta,
++                                        )
++                                        shot_clips.append(card_path)
++                                        shot_metadata_list.append(card_meta)
++                                        logger.warning(
++                                            f"Scene {order} Shot {s_idx}: abstract process ({_feas_msg}); "
++                                            f"rendered a title card instead of unrelated stock footage."
++                                        )
++                                        continue
++
+                                 if verified_cand is None:
+                                     pending_shot_reviews = [
+                                         pr for pr in self.get_pending_approvals(project_id)
+diff --git a/app/services/providers/groq_script_provider.py b/app/services/providers/groq_script_provider.py
+index 1de7beb..bd18bbc 100644
+--- a/app/services/providers/groq_script_provider.py
++++ b/app/services/providers/groq_script_provider.py
+@@ -70,8 +70,16 @@ class GroqScriptProvider(ScriptProvider):
+             self._internal_client = httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_seconds))
+         return self._internal_client
+ 
++    # Measured: edge-tts narration plus the pauses between scenes averages ~109 words/min on
++    # short videos (a 15s request rendered at 18.75s with the old 130 wpm budget).
++    SHORT_VIDEO_EFFECTIVE_WPM = 108
++    SHORT_VIDEO_MAX_SECONDS = 30
++
+     def calculate_target_words(self, duration_seconds: int) -> int:
+-        return int(round(duration_seconds * self.words_per_minute / 60.0))
++        wpm = self.words_per_minute
++        if duration_seconds <= self.SHORT_VIDEO_MAX_SECONDS:
++            wpm = min(wpm, self.SHORT_VIDEO_EFFECTIVE_WPM)
++        return int(round(duration_seconds * wpm / 60.0))
+ 
+     def clean_script_text(self, text: str) -> str:
+         text = re.sub(r'\[.*?\]', '', text)
+diff --git a/app/services/providers/ollama_script_provider.py b/app/services/providers/ollama_script_provider.py
+index 1924c43..885e0fd 100644
+--- a/app/services/providers/ollama_script_provider.py
++++ b/app/services/providers/ollama_script_provider.py
+@@ -31,7 +31,9 @@ class OllamaScriptProvider(ScriptProvider):
+         self.last_trimming_occurred = False
+ 
+     def calculate_target_words(self, duration_seconds: int) -> int:
+-        return int(duration_seconds * self.words_per_minute / 60)
++        # Short videos: measured effective narration speed (incl. scene pauses) is ~109 wpm
++        wpm = min(self.words_per_minute, 108) if duration_seconds <= 30 else self.words_per_minute
++        return int(duration_seconds * wpm / 60)
+ 
+     def clean_script_text(self, text: str) -> str:
+         # Remove bracketed stage directions like [Music], (Narrator:), [Scene 1]
+diff --git a/app/services/visual_verification.py b/app/services/visual_verification.py
+index 2e47a45..3981583 100644
+--- a/app/services/visual_verification.py
++++ b/app/services/visual_verification.py
+@@ -1,6 +1,7 @@
+ import os
+ import io
+ import re
++from app.schemas.visual_spec import PLACEHOLDER_SETTING
+ import math
+ import base64
+ import logging
+@@ -338,6 +339,8 @@ class HeuristicVisualVerifier:
+         req_subject = str(shot_requirements.get("primary_subject") or "").strip().lower()
+         req_action = str(shot_requirements.get("required_visible_action") or "").strip().lower()
+         req_setting = str(shot_requirements.get("required_setting") or "").strip().lower()
++        if req_setting == PLACEHOLDER_SETTING:
++            req_setting = ""  # neutral placeholder from single-action scenes, not a real requirement
+         req_state = str(shot_requirements.get("visual_state") or "").strip().lower()
+         req_objects = [str(o).strip().lower() for o in (shot_requirements.get("required_objects") or []) if o]
+         explicit_exclusions = [str(e).strip().lower() for e in (shot_requirements.get("explicit_exclusions") or []) if e]
+@@ -371,8 +374,8 @@ class HeuristicVisualVerifier:
+         uncertainties: List[str] = []
+ 
+         # Technical frame health check
+-        if luminance < 3.0:
+-            contradictions.append("Pitch black or corrupted frames detected (luminance < 3.0)")
++        if luminance < 10.0:
++            contradictions.append("Near-black or corrupted frames detected (luminance < 10.0)")
+         elif luminance > 252.0:
+             contradictions.append("Overexposed washed-out white frames detected (luminance > 252.0)")
+ 
+diff --git a/test_phase3_fixes.py b/test_phase3_fixes.py
+new file mode 100644
+index 0000000..5016c01
+--- /dev/null
++++ b/test_phase3_fixes.py
+@@ -0,0 +1,110 @@
++"""Tests for the phase-3 fixes: safe validators, abstract-scene title cards, placeholder setting,
++near-black rejection and short-video word budget.   Run: python test_phase3_fixes.py"""
++import os, sys, types, subprocess, tempfile
++os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://u:p@localhost/db")
++try:
++    import av  # noqa: F401
++except Exception:
++    sys.modules["av"] = types.ModuleType("av")
++import numpy as np
++from PIL import Image
++from pydantic import ValidationError
++
++from app.schemas.visual_spec import (ShotSpecificationSchema, VisualSpecificationSchema,
++                                     find_scientific_contradictions, PLACEHOLDER_SETTING)
++from app.services.visual_verification import HeuristicVisualVerifier as H, VerificationStatus as S
++from app.services.pipeline_orchestrator import extract_scene_subject
++
++fails = []
++def check(name, cond):
++    print(("PASS " if cond else "FAIL ") + name)
++    if not cond: fails.append(name)
++
++# ---- validators: correct text must pass, wrong text must still be caught ----
++ok_cases = [
++    ("seedling", "Roots anchor in soil while the shoot grows upward"),
++    ("plant", "Root hairs absorb water as the stem pushes upward"),
++    ("beetroot", "Beetroot leaves growing upward in a garden bed"),
++    ("vegetable stall", "Camera tilts upward over a stall of root vegetables"),
++    ("root system", "The root system grows downward into dark soil"),
++    ("plant", "Water travels upward from the roots to the leaves"),
++    ("root tip", "Root tip pushes downward into dark soil"),
++    ("dry seed", "A dry seed swells as water enters its coat, before it becomes a seedling"),
++]
++for subj, act in ok_cases:
++    check(f"validator accepts: {act}", find_scientific_contradictions(subj, act) == [])
++
++bad_cases = [
++    ("root tip", "Root tip elongates upward from soil"),
++    ("emerging root tip", "A root tip emerges and elongates upward toward the sky"),
++    ("root radicle", "Macro close-up of root radicle growing upward towards the surface"),
++    ("stem", "The stem pushes downward into the soil"),
++    ("dry seed", "A dry seed that is already a green leafy seedling"),
++    ("enzymes", "Enzymes shown by pouring into a glass of water"),
++]
++for subj, act in bad_cases:
++    check(f"validator still catches: {act}", find_scientific_contradictions(subj, act) != [])
++
++def raises(fn):
++    try: fn()
++    except ValidationError: return True
++    return False
++check("ShotSpecificationSchema rejects root growing upward",
++      raises(lambda: ShotSpecificationSchema(shot_index=1, primary_subject="emerging root tip",
++             required_visible_action="A root tip emerges and elongates upward toward the sky",
++             required_setting="dark soil", search_keywords=["root growing", "germination macro"],
++             provisional_start_seconds=0.0, provisional_end_seconds=3.0)))
++check("ShotSpecificationSchema accepts a correct shoot+root sentence",
++      not raises(lambda: ShotSpecificationSchema(shot_index=1, primary_subject="seedling",
++             required_visible_action="Roots anchor in soil while the shoot grows upward",
++             required_setting="garden", search_keywords=["seedling growing", "plant growth macro"],
++             provisional_start_seconds=0.0, provisional_end_seconds=3.0)))
++check("VisualSpecificationSchema accepts a correct shoot+root scene prompt",
++      not raises(lambda: VisualSpecificationSchema(primary_subject="seedling",
++             visual_prompt="Macro shot of roots anchoring in soil while the shoot grows upward",
++             search_keywords=["seedling roots soil", "plant growth macro"])))
++
++# ---- subject extraction on the real prompts from the seed-to-plant run ----
++topic = "How a seed grows into a plant"
++real = [
++ ("Extreme macro close-up of a dry seed as a single water droplet contacts its surface, the droplet spreads.", ["macro seed water"], "dry seed"),
++ ("Extreme macro close-up of a plant root tip emerging from dark soil, fibers spreading.", ["macro root tip"], "root tip"),
++ ("Macro close-up of a green plant shoot extending upward, then a fresh leaf unfurling from the stem.", ["macro plant shoot"], "plant shoot"),
++]
++for prompt, kws, want in real:
++    got = extract_scene_subject({"visual_prompt": prompt, "search_keywords": kws}, fallback_topic=topic)
++    check(f"subject from real prompt -> '{want}' (got '{got}')", want in got and got != topic)
++
++# ---- placeholder setting + near-black ----
++rng = np.random.default_rng(0)
++def frames(lo, hi):
++    out = []
++    for t in (0.5, 1.0, 1.5):
++        a = rng.integers(lo, hi, (64, 64, 3), dtype=np.uint8); out.append((t, Image.fromarray(a), a))
++    return out
++req = {"primary_subject": "root tip", "required_visible_action": "root tip emerging", "required_setting": PLACEHOLDER_SETTING,
++       "required_objects": [], "explicit_exclusions": []}
++res = H.evaluate(frames(60, 200), req, {"clip_text": "root tip appropriate setting"})
++check("placeholder setting is never counted as evidence", "Setting terms matched" not in " ".join(res.confirmed_matches))
++check("near-black footage is REJECTED even when text matches",
++      H.evaluate(frames(0, 12), req, {"clip_text": "macro root tip emerging from soil"}).status == S.REJECTED)
++
++# ---- title card renders a real, decodable clip of the right length ----
++from app.services.info_card import render_info_card
++with tempfile.TemporaryDirectory() as d:
++    out = os.path.join(d, "card.mp4")
++    render_info_card("Enzymes activate, breaking stored food into sugars.", out, 5.0)
++    pr = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_name,width,height,r_frame_rate,duration",
++                         "-of", "default=noprint_wrappers=1", out], capture_output=True, text=True)
++    info = pr.stdout
++    check("title card is a 1280x720 h264 24fps clip", all(k in info for k in ("h264", "width=1280", "height=720", "24/1")))
++    dur = float([l for l in info.splitlines() if l.startswith("duration=")][0].split("=")[1])
++    check("title card duration is ~5s", 4.8 <= dur <= 5.3)
++
++# ---- short-video word budget ----
++from app.services.providers.groq_script_provider import GroqScriptProvider as G
++g = G.__new__(G); g.words_per_minute = 130
++check("15s video -> ~27 words (was 33)", g.calculate_target_words(15) == 27)
++check("5-minute video still uses the configured 130 wpm", g.calculate_target_words(300) == 650)
++
++print("\n%d failed" % len(fails)); sys.exit(1 if fails else 0)

@@ -1,3 +1,4 @@
+import re
 import math
 from typing import List, Optional, Literal, Dict, Any, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -191,11 +192,18 @@ class ShotSpecificationSchema(BaseModel):
                 raise ValueError(f"expected_duration must be positive, got {self.expected_duration}")
         else:
             self.expected_duration = calc_duration
+
+        # Scientific & biological accuracy (clause-level, whole-word matching)
+        _problems = find_scientific_contradictions(self.primary_subject, self.required_visible_action)
+        if _problems:
+            raise ValueError("Scientific contradiction: " + "; ".join(_problems))
+
         return self
 
 
 class VisualSpecificationSchema(BaseModel):
     visual_prompt: str = Field(..., description="Short concrete visual description of observable scene elements")
+    primary_subject: Optional[str] = Field(default=None, description="Primary entity or object filmed in this scene (e.g. 'dry seed', 'root tip in soil')")
     search_keywords: List[str] = Field(..., description="List of concrete stock media search terms")
     action_timeline: Optional[List[ActionEventSchema]] = Field(
         default=None,
@@ -213,6 +221,14 @@ class VisualSpecificationSchema(BaseModel):
         if not cleaned:
             raise ValueError("visual_prompt cannot be empty")
         return cleaned
+
+    @field_validator('primary_subject')
+    @classmethod
+    def validate_primary_subject(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned if cleaned else None
 
     @field_validator('search_keywords')
     @classmethod
@@ -283,6 +299,12 @@ class VisualSpecificationSchema(BaseModel):
                             f"Shot {s.shot_index} specifies action_event_index {s.action_event_index}, "
                             f"which is out of range for action_timeline with {len(self.action_timeline)} events."
                         )
+
+        # Scientific & biological accuracy at scene level (clause-level, whole-word matching)
+        _problems = find_scientific_contradictions(self.primary_subject or "", self.visual_prompt)
+        if _problems:
+            raise ValueError("Scientific contradiction: " + "; ".join(_problems))
+
         return self
 
 
@@ -479,3 +501,71 @@ def validate_action_timeline_timing(
 
     return validated
 
+
+# ---------------------------------------------------------------------------
+# Neutral placeholder used when a single-action scene has no real setting
+# ---------------------------------------------------------------------------
+PLACEHOLDER_SETTING = "appropriate setting"
+
+
+# ---------------------------------------------------------------------------
+# Scientific-accuracy checks used by the schema validators above.
+# Whole-word, clause-level matching so correct sentences are not rejected:
+#   "Roots anchor in soil while the shoot grows upward"  -> fine
+#   "The root system grows downward"                      -> fine ("system" is not "stem")
+#   "Beetroot leaves growing upward"                      -> fine ("beetroot" is not "root")
+#   "Root tip elongates upward from soil"                 -> contradiction
+# ---------------------------------------------------------------------------
+_ROOT_RE = re.compile(r"\b(?:roots?|radicles?|taproots?)\b")
+_SHOOT_RE = re.compile(r"\b(?:shoots?|stems?|plumules?|hypocotyls?|epicotyls?)\b")
+_UP_RE = re.compile(r"\b(?:upwards?|(?:towards?) the (?:sky|surface|light))\b")
+_SHOOT_DOWN_RE = re.compile(r"\bdownwards? into (?:the )?(?:soil|earth|ground)\b|\bgrowing downwards?\b|\bdeep underground\b")
+# Words showing the clause is about something other than the root's own growth direction
+_NOT_GROWTH_RE = re.compile(
+    r"\b(?:camera|tilts?|tilting|pans?|panning|zooms?|vegetables?|crops?|market|stall|"
+    r"water|sap|nutrients?|moisture|travels?|transport\w*|flows?|rises?|rising|"
+    r"shoots?|stems?|leaf|leaves|sprouts?|seedlings?)\b"
+)
+_DRY_SEED_RE = re.compile(r"\b(?:dry|dormant|unsprouted) seeds?\b|\bseed imbibition\b|\bseed water absorption\b")
+_GROWN_STAGE_RE = re.compile(r"\b(?:seedlings?|leafy|green leaves|grown plant|mature sprout|nursery trays?)\b")
+_STAGE_TRANSITION_RE = re.compile(r"\b(?:into|becomes?|before|until|later|eventually|after)\b")
+_ENZYME_RE = re.compile(r"\b(?:enzymes?|enzymatic|starch breakdown|cellular respiration)\b")
+_KITCHEN_SUBSTITUTES = ("drinking glass", "pouring into a glass", "pouring into a bowl", "glass of water", "kitchen bowl")
+_CLAUSE_SPLIT_RE = re.compile(r"[.;:!?\n]|,|\bwhile\b|\bas\b|\bthen\b|\bwhereas\b|\bmeanwhile\b|\bbut\b")
+
+
+def find_scientific_contradictions(subject: str, text: str) -> List[str]:
+    """Return human-readable contradictions found in a shot/scene description (empty list = fine)."""
+    subj = (subject or "").lower().strip()
+    body = (text or "").lower().strip()
+    problems: List[str] = []
+    subject_is_root = bool(_ROOT_RE.search(subj)) and not _SHOOT_RE.search(subj)
+    subject_is_shoot = bool(_SHOOT_RE.search(subj)) and not _ROOT_RE.search(subj)
+    subject_dry_seed = bool(_DRY_SEED_RE.search(subj))
+
+    for clause in _CLAUSE_SPLIT_RE.split(body):
+        clause = clause.strip()
+        if not clause:
+            continue
+        # Roots must not be described growing upward
+        if (subject_is_root or _ROOT_RE.search(clause)) and _UP_RE.search(clause) and not _NOT_GROWTH_RE.search(clause):
+            problems.append(
+                f"plant roots grow downward into soil (positive gravitropism); upward direction found in '{clause}'"
+            )
+        # Shoots must not be described growing down into the soil
+        if (subject_is_shoot or _SHOOT_RE.search(clause)) and not _ROOT_RE.search(clause) and _SHOOT_DOWN_RE.search(clause):
+            problems.append(
+                f"plant shoots grow upward toward light; downward direction found in '{clause}'"
+            )
+        # A dry / dormant seed must not be described as an already grown seedling
+        if (subject_dry_seed or _DRY_SEED_RE.search(clause)) and _GROWN_STAGE_RE.search(clause) \
+                and not _STAGE_TRANSITION_RE.search(clause):
+            problems.append(f"a dry/dormant seed cannot be described as an already grown stage in '{clause}'")
+
+    # Internal biochemistry must not be replaced by a kitchen action
+    if _ENZYME_RE.search(f"{subj} {body}"):
+        for sub in _KITCHEN_SUBSTITUTES:
+            if sub in body:
+                problems.append(f"cannot substitute the kitchen action '{sub}' for an internal biochemical process")
+                break
+    return problems

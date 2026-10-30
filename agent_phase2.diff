@@ -1,0 +1,761 @@
+﻿diff --git a/.env.example b/.env.example
+index c0e88b3..fafb1d4 100644
+--- a/.env.example
++++ b/.env.example
+@@ -1,9 +1,22 @@
+-DATABASE_URL=postgresql+asyncpg://aivideo_user:aivideo_02@localhost:5432/aivideo_db
+-JWT_SECRET=super_secret_jwt_key_change_me_in_production_123456789
++DATABASE_URL=postgresql+asyncpg://your_db_user:your_db_password@localhost:5432/your_db_name
++JWT_SECRET=change_me_to_a_long_random_string
+ JWT_ALGORITHM=HS256
+ JWT_EXPIRE_MINUTES=1440
++
++# Script / scene / visual-spec generation: "groq" (cloud, default) or "ollama" (local)
++SCRIPT_PROVIDER=groq
++GROQ_API_KEY=your_groq_api_key_here
++GROQ_MODEL=openai/gpt-oss-120b
++# Only needed if SCRIPT_PROVIDER=ollama
+ OLLAMA_BASE_URL=http://localhost:11434
+ OLLAMA_MODEL=llama3.2
+-NARRATION_WPM=150
++
++NARRATION_WPM=130
++TTS_VOICE=en-US-ChristopherNeural
++
+ PEXELS_API_KEY=your_pexels_api_key_here
++FREESOUND_API_KEY=your_freesound_api_key_here
+ MEDIA_STORAGE_PATH=./media
++
++# "block" = stop for manual approval when footage can't be verified; "best_effort" = use best unverified clip
++UNCERTAIN_FOOTAGE_POLICY=block
+diff --git a/app/config.py b/app/config.py
+index 6da5261..21d46f9 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -22,6 +22,12 @@ class Settings(BaseSettings):
+     ENABLE_SCRIPT_CACHE: bool = False
+     SCRIPT_PROVIDER: str = "groq"
+ 
++    # What to do when no candidate clip is verified for a shot:
++    #   "block"       - stop and wait for manual approval (strict, original behaviour)
++    #   "best_effort" - use the best-scoring unverified clip and record it as UNCERTAIN
++    #                   in the scene metadata so it can be reviewed later
++    UNCERTAIN_FOOTAGE_POLICY: str = "block"
++
+     model_config = SettingsConfigDict(
+         env_file=".env",
+         env_file_encoding="utf-8",
+diff --git a/app/schemas/visual_spec.py b/app/schemas/visual_spec.py
+index e750bc4..d918dd3 100644
+--- a/app/schemas/visual_spec.py
++++ b/app/schemas/visual_spec.py
+@@ -191,11 +191,57 @@ class ShotSpecificationSchema(BaseModel):
+                 raise ValueError(f"expected_duration must be positive, got {self.expected_duration}")
+         else:
+             self.expected_duration = calc_duration
++
++        # Scientific & Biological Accuracy Validation
++        subj_lower = self.primary_subject.lower()
++        act_lower = self.required_visible_action.lower()
++        combined = f"{subj_lower} {act_lower}"
++
++        # 1. Root & Shoot Direction (Gravitropism vs Phototropism)
++        if any(term in combined for term in ("root", "radicle", "taproot", "root tip")):
++            upward_terms = ("upward", "upwards", "towards the sky", "towards the surface", "pointing upward", "growing upward", "elongates upward")
++            for ut in upward_terms:
++                if ut in act_lower or ut in subj_lower:
++                    raise ValueError(
++                        f"Scientific contradiction: plant roots exhibit positive gravitropism and grow downward "
++                        f"into soil/substrate. Contradictory upward direction found: '{ut}' in '{self.required_visible_action}'."
++                    )
++
++        if any(term in combined for term in ("shoot", "stem", "plumule", "hypocotyl")):
++            downward_terms = ("downward into soil", "downward into earth", "deep underground", "growing downward")
++            for dt in downward_terms:
++                if dt in act_lower:
++                    raise ValueError(
++                        f"Scientific contradiction: plant shoots exhibit phototropism and grow upward toward light. "
++                        f"Contradictory downward direction found: '{dt}' in '{self.required_visible_action}'."
++                    )
++
++        # 2. Seed Developmental Stage Integrity
++        if any(term in combined for term in ("dry seed", "dormant seed", "unsprouted seed", "seed imbibition", "seed water absorption")):
++            contradictory_stages = ("seedling", "leafy", "green leaves", "grown plant", "mature sprout", "nursery tray")
++            for stage in contradictory_stages:
++                if stage in combined:
++                    raise ValueError(
++                        f"Scientific contradiction: dry/dormant seed cannot be described as an already grown "
++                        f"stage ('{stage}')."
++                    )
++
++        # 3. Biochemical Process Substitution Prevention
++        if any(term in combined for term in ("enzyme", "enzymes", "enzymatic", "starch breakdown", "cellular respiration")):
++            unrelated_substitutions = ("drinking glass", "pouring into a glass", "pouring into a bowl", "glass of water", "kitchen bowl")
++            for sub in unrelated_substitutions:
++                if sub in act_lower:
++                    raise ValueError(
++                        f"Scientific contradiction: cannot substitute domestic/kitchen action ('{sub}') "
++                        f"for an internal biochemical process."
++                    )
++
+         return self
+ 
+ 
+ class VisualSpecificationSchema(BaseModel):
+     visual_prompt: str = Field(..., description="Short concrete visual description of observable scene elements")
++    primary_subject: Optional[str] = Field(default=None, description="Primary entity or object filmed in this scene (e.g. 'dry seed', 'root tip in soil')")
+     search_keywords: List[str] = Field(..., description="List of concrete stock media search terms")
+     action_timeline: Optional[List[ActionEventSchema]] = Field(
+         default=None,
+@@ -214,6 +260,14 @@ class VisualSpecificationSchema(BaseModel):
+             raise ValueError("visual_prompt cannot be empty")
+         return cleaned
+ 
++    @field_validator('primary_subject')
++    @classmethod
++    def validate_primary_subject(cls, value: Optional[str]) -> Optional[str]:
++        if value is None:
++            return None
++        cleaned = value.strip()
++        return cleaned if cleaned else None
++
+     @field_validator('search_keywords')
+     @classmethod
+     def validate_search_keywords(cls, value: List[str]) -> List[str]:
+@@ -283,6 +337,42 @@ class VisualSpecificationSchema(BaseModel):
+                             f"Shot {s.shot_index} specifies action_event_index {s.action_event_index}, "
+                             f"which is out of range for action_timeline with {len(self.action_timeline)} events."
+                         )
++
++        # Scientific Accuracy Validation at Scene Level
++        prompt_lower = self.visual_prompt.lower()
++        subj_lower = (self.primary_subject or "").lower()
++        combined = f"{subj_lower} {prompt_lower}"
++
++        # 1. Root Direction
++        if any(term in combined for term in ("root", "radicle", "taproot", "root tip")):
++            upward_terms = ("upward", "upwards", "towards the sky", "towards the surface", "pointing upward", "growing upward", "elongates upward")
++            for ut in upward_terms:
++                if ut in prompt_lower or ut in subj_lower:
++                    raise ValueError(
++                        f"Scientific contradiction: plant roots grow downward into substrate (positive gravitropism), "
++                        f"not upward. Contradictory upward motion found: '{ut}'."
++                    )
++
++        # 2. Seed Developmental Stage Integrity
++        if any(term in combined for term in ("dry seed", "dormant seed", "unsprouted seed", "seed imbibition", "seed water absorption")):
++            contradictory_stages = ("seedling", "leafy", "green leaves", "grown plant", "mature sprout", "nursery tray")
++            for stage in contradictory_stages:
++                if stage in combined:
++                    raise ValueError(
++                        f"Scientific contradiction: dry/dormant seed cannot be described as a leafy seedling "
++                        f"or grown plant ('{stage}')."
++                    )
++
++        # 3. Biochemical Process Substitution Prevention
++        if any(term in combined for term in ("enzyme", "enzymes", "enzymatic", "starch breakdown", "cellular respiration")):
++            unrelated_substitutions = ("drinking glass", "pouring into a glass", "pouring into a bowl", "glass of water", "kitchen bowl")
++            for sub in unrelated_substitutions:
++                if sub in prompt_lower:
++                    raise ValueError(
++                        f"Scientific contradiction: cannot substitute kitchen action ('{sub}') "
++                        f"for internal biochemical process."
++                    )
++
+         return self
+ 
+ 
+diff --git a/app/services/pipeline_orchestrator.py b/app/services/pipeline_orchestrator.py
+index e9a6493..46f8e0a 100644
+--- a/app/services/pipeline_orchestrator.py
++++ b/app/services/pipeline_orchestrator.py
+@@ -1,4 +1,5 @@
+ import os
++import re
+ import json
+ import uuid
+ import inspect
+@@ -59,6 +60,69 @@ PROTECTED_REFERENCE_MEDIA = frozenset({
+ })
+ 
+ 
++def extract_scene_subject(
++    scene_dict: Dict[str, Any],
++    fallback_topic: Optional[str] = None
++) -> str:
++    """
++    Extract a scene-specific primary subject rather than using the broad global topic name.
++    Priority:
++    1. 'primary_subject' explicitly provided in scene_dict (from visual specification).
++    2. 'primary_subject' from the first shot in shot_plan, if present.
++    3. Concrete subject extracted from visual_prompt or scene_text.
++    4. First specific search keyword from search_keywords.
++    5. Cleaned fallback noun phrase from topic.
++    """
++    # 1. Direct explicit scene-level primary_subject
++    if scene_dict.get("primary_subject") and str(scene_dict["primary_subject"]).strip():
++        return str(scene_dict["primary_subject"]).strip()
++
++    # 2. Check shot_plan if present
++    sp = scene_dict.get("shot_plan")
++    if isinstance(sp, list) and len(sp) > 0:
++        first_shot = sp[0]
++        if isinstance(first_shot, dict) and first_shot.get("primary_subject"):
++            return str(first_shot["primary_subject"]).strip()
++        elif hasattr(first_shot, "primary_subject") and first_shot.primary_subject:
++            return str(first_shot.primary_subject).strip()
++
++    # 3. Extract from visual_prompt or scene_text
++    prompt = str(scene_dict.get("visual_prompt") or scene_dict.get("scene_text") or "").strip()
++    if prompt:
++        m = re.search(
++            r'(?:close-up|macro shot|shot|view|timelapse|photo|cinematic macro shot|extreme close-up|cinematic shot)\s+of\s+(?:a|an|the)?\s*([^,\.]+?)(?:\s+(?:resting|in|as|with|pushing|falling|sizzling|growing|emerging|on|into|breaking|swelling)|\.|,)',
++            prompt,
++            re.IGNORECASE
++        )
++        if m:
++            extracted = m.group(1).strip()
++            if len(extracted) >= 3 and len(extracted.split()) <= 4:
++                return extracted
++
++        m2 = re.search(r'^(?:a|an|the)?\s*([a-z\s]{3,30}?)\s+(?:enters|absorbs|grows|pushes|emerges|swells|awakens|sizzles|pours|simmers)', prompt, re.IGNORECASE)
++        if m2:
++            extracted = m2.group(1).strip()
++            if len(extracted) >= 3:
++                return extracted
++
++    # 4. First search keyword if meaningful
++    kws = scene_dict.get("search_keywords") or []
++    if kws and isinstance(kws, list) and len(kws) > 0:
++        first_kw = str(kws[0]).strip()
++        kw_words = [w for w in re.split(r'\W+', first_kw) if len(w) > 2 and w.lower() not in ("macro", "close", "timelapse", "video", "shot")]
++        if kw_words:
++            candidate_subject = " ".join(kw_words[:2])
++            if len(candidate_subject) >= 3:
++                return candidate_subject
++
++    # 5. Cleaned topic fallback
++    if fallback_topic and str(fallback_topic).strip():
++        cleaned_top = re.sub(r'^(how\s+(?:a|to|an)?|the\s+|why\s+)', '', str(fallback_topic).strip(), flags=re.IGNORECASE).strip()
++        return cleaned_top if cleaned_top else "subject"
++
++    return "subject"
++
++
+ class VideoPipelineOrchestrator:
+     """
+     Coordinates the seven-stage AI Text-to-Video generation pipeline:
+@@ -853,14 +917,15 @@ class VideoPipelineOrchestrator:
+ 
+                 shot_plan = sc.get("shot_plan")
+                 if not shot_plan:
++                    scene_subject = extract_scene_subject(sc, fallback_topic=topic)
+                     shot_plan = [{
+                         "shot_index": 1,
+                         "provisional_start_seconds": 0.0,
+                         "provisional_end_seconds": dur,
+                         "required_visible_action": sc.get("visual_prompt") or sc.get("scene_text") or "cinematic scene",
+-                        "primary_subject": topic or "subject",
++                        "primary_subject": scene_subject,
+                         "search_keywords": kw_list,
+-                        "required_setting": "appropriate setting",
++                        "required_setting": sc.get("required_setting") or "appropriate setting",
+                     }]
+ 
+                 if shot_plan:
+@@ -972,6 +1037,7 @@ class VideoPipelineOrchestrator:
+                                     raise NoSuitableMediaFoundError(f"No candidate video clips returned for shot {s_idx}.")
+ 
+                                 # 2. Actual Video-Frame Verification Loop
++                                best_uncertain = None
+                                 for cand in candidates:
+                                     p_id = cand.metadata.get("pexels_id")
+ 
+@@ -1055,6 +1121,9 @@ class VideoPipelineOrchestrator:
+                                             f"Candidate {p_id} for Scene {order} Shot {s_idx} is UNCERTAIN: "
+                                             f"contact sheet saved to {cs_path}. Awaiting manual approval."
+                                         )
++                                        _score = float((cand.metadata or {}).get("semantic_score", 0.0) or 0.0)
++                                        if best_uncertain is None or _score > best_uncertain[3]:
++                                            best_uncertain = (cand, cand_f, current_vres, _score)
+                                     else:
+                                         logger.warning(
+                                             f"Candidate {p_id} for Scene {order} Shot {s_idx} REJECTED: {'; '.join(current_vres.contradictions)}"
+@@ -1066,8 +1135,30 @@ class VideoPipelineOrchestrator:
+                                                 pass
+ 
+                                 # CRITICAL ACCURACY RULE:
+-                                # Never automatically treat UNCERTAIN or MANUAL_REVIEW_REQUIRED as verified!
+-                                # Unapproved uncertain footage is NEVER sent to final assembly.
++                                # UNCERTAIN or MANUAL_REVIEW_REQUIRED footage is never treated as verified.
++                                # With UNCERTAIN_FOOTAGE_POLICY="block" (default) it is never sent to final
++                                # assembly. With "best_effort" the best unverified clip MAY be assembled,
++                                # but it is explicitly flagged unverified (unverified_best_effort=True,
++                                # is_visual_frame_verified=False) and stays in the pending-review registry.
++                                if (
++                                    verified_cand is None
++                                    and best_uncertain is not None
++                                    and str(settings.UNCERTAIN_FOOTAGE_POLICY).strip().lower() == "best_effort"
++                                    and ConceptClassifier.classify_feasibility(shot_ctx.get("required_action", ""), shot_ctx.get("primary_subject", ""), shot_ctx.get("visual_prompt", ""))[0] != ConceptFeasibility.CONCEPTUAL_ABSTRACT
++                                ):
++                                    verified_cand, verified_file, v_res, _ = best_uncertain
++                                    v_res.is_visual_frame_verified = False
++                                    v_res.evidence.append(
++                                        "BEST-EFFORT: no clip was verified; this UNVERIFIED clip was used "
++                                        "because UNCERTAIN_FOOTAGE_POLICY=best_effort. Not approved."
++                                    )
++                                    used_video_ids.add(verified_cand.metadata.get("pexels_id"))
++                                    logger.warning(
++                                        f"Scene {order} Shot {s_idx}: no verified clip; using best UNVERIFIED candidate "
++                                        f"{verified_cand.metadata.get('pexels_id')} (UNCERTAIN_FOOTAGE_POLICY=best_effort). "
++                                        f"It is recorded as uncertain in the scene metadata and in the approval registry."
++                                    )
++
+                                 if verified_cand is None:
+                                     pending_shot_reviews = [
+                                         pr for pr in self.get_pending_approvals(project_id)
+@@ -1083,10 +1174,14 @@ class VideoPipelineOrchestrator:
+ 
+                                     feas, feas_msg = ConceptClassifier.classify_feasibility(
+                                         shot_ctx.get("required_action", ""),
+-                                        shot_ctx.get("primary_subject", "")
++                                        shot_ctx.get("primary_subject", ""),
++                                        shot_ctx.get("visual_prompt", "")
+                                     )
+                                     reason_str = f"All candidate clips failed visual verification for shot {s_idx} ('{r_shot.get('required_visible_action')}')"
+                                     if feas == ConceptFeasibility.CONCEPTUAL_ABSTRACT:
++                                        sc["requires_animation"] = True
++                                        sc["recommended_strategy"] = "diagram_or_motion_graphic"
++                                        sc["feasibility_reason"] = feas_msg
+                                         reason_str += f" ({feas_msg})"
+                                     raise NoSuitableMediaFoundError(reason_str)
+ 
+@@ -1116,6 +1211,7 @@ class VideoPipelineOrchestrator:
+                                 "verification_evidence": v_res.evidence,
+                                 "evaluated_timestamps": v_res.evaluated_timestamps,
+                                 "is_visual_frame_verified": v_res.is_visual_frame_verified,
++                                "unverified_best_effort": v_res.status != VerificationStatus.ACCEPTED,
+                                 "recommended_strategy": v_res.recommended_strategy
+                             }
+                             await self._save_scene_asset(
+diff --git a/app/services/providers/groq_script_provider.py b/app/services/providers/groq_script_provider.py
+index 6818c7d..8b31958 100644
+--- a/app/services/providers/groq_script_provider.py
++++ b/app/services/providers/groq_script_provider.py
+@@ -437,12 +437,17 @@ class GroqScriptProvider(ScriptProvider):
+     def _classify_topic(cls, topic: str) -> str:
+         t_lower = topic.lower()
+ 
+-        # 1. Historical topics (explicitly requesting history, origins, eras, civilizations)
++        # 1. Historical topics that EXPLICITLY ask for history (strong signals only).
++        # Weak era words such as "ancient" or "century" are handled after the
++        # science/cooking/technology checks, so "ancient seed germination" is science.
+         history_keywords = [
+-            "history", "historical", "ancient", "origin of", "origins of",
+-            "empire", "dynasty", "century", "civilization", "revolution",
+-            "medieval", "renaissance", "war of", "world war", "battle of",
+-            "antiquity", "archaeology", "historical origins"
++            "history", "historical", "origin of", "origins of",
++            "empire", "dynasty", "civilization", "revolution",
++            "war of", "world war", "battle of",
++            "archaeology", "historical origins"
++        ]
++        weak_history_keywords = [
++            "ancient", "century", "medieval", "renaissance", "antiquity"
+         ]
+         if any(re.search(r'\b' + re.escape(kw) + r'\b', t_lower) for kw in history_keywords):
+             return "history"
+@@ -484,6 +489,10 @@ class GroqScriptProvider(ScriptProvider):
+         if any(re.search(r'\b' + re.escape(kw) + r'\b', t_lower) for kw in tech_keywords):
+             return "technology"
+ 
++        # 4b. Weak history signals only win when no subject-matter category matched above
++        if any(re.search(r'\b' + re.escape(kw) + r'\b', t_lower) for kw in weak_history_keywords):
++            return "history"
++
+         # 5. Creative storytelling / narrative fiction
+         story_keywords = [
+             "story", "stories", "tale", "tales", "fable", "fables", "adventure",
+@@ -575,20 +584,21 @@ class GroqScriptProvider(ScriptProvider):
+             min_target_words = int(target_words * 0.90)
+ 
+         prompt = (
+-            f"You are a master documentary scriptwriter crafting a rich, immersive spoken narration.\n"
++            f"You are a clear, practical scriptwriter writing plain spoken narration for a short explainer video.\n"
+             f"Write a full narration script for a video about: \"{topic}\".\n\n"
+             f"TARGET DURATION: {desired_duration_seconds} seconds.\n"
+             f"TARGET LENGTH: AT LEAST {target_words} WORDS (approx. {target_words} to {max_target_words} words).\n\n"
+             f"CONTENT INSTRUCTIONS:\n"
+             f"{content_instructions}\n"
+-            f"- It is CRITICAL that the text is detailed and lengthy enough to reach the target word count of AT LEAST {target_words} words.\n\n"
++            f"- The text must be long enough to reach the target word count of AT LEAST {target_words} words.\n\n"
+             f"STRICT FORMATTING RULES:\n"
+             f"1. Return ONLY the spoken narration text. Do not include intro/outro conversational remarks.\n"
+             f"2. Do NOT include any titles, headers, or section names.\n"
+             f"3. Do NOT include any bullet points or numbered lists.\n"
+             f"4. Do NOT include any Markdown formatting.\n"
+             f"5. Do NOT include any stage directions, narrator tags, or visual cues (e.g. no '[Music]', '(Narrator:)', 'Scene 1:').\n"
+-            f"6. Make the narration continuous, naturally spoken, and rich in detail to fulfill the {target_words} words target.\n\n"
++            f"6. Make the narration continuous and naturally spoken. Reach the word target by adding concrete facts, steps and cause-and-effect, never decorative language.\n"
++            f"7. Write in direct, concrete sentences about what happens and why. Do NOT write poetic or ornate prose, do NOT use flowery adjectives or metaphors (e.g. 'tender', 'whispers', 'dances'), and do NOT describe camera views or how things look on screen.\n\n"
+             f"Spoken Narration Script:"
+         )
+ 
+@@ -694,13 +704,25 @@ class GroqScriptProvider(ScriptProvider):
+             f"SCENE NARRATION:\n\"{scene_text.strip()}\"\n"
+             f"PROVISIONAL SCENE DURATION: approx. {est_duration} seconds.\n\n"
+             f"INSTRUCTIONS:\n"
+-            f"1. 'visual_prompt': Describe a single, concrete, observable physical action happening right now on screen. Specify the exact primary subject, physical motion, camera angle/framing (e.g., extreme close-up, macro shot, low angle, aerial view), setting, and natural lighting. Focus strictly on visible physical actions. Do NOT use abstract concepts, metaphors, or broad thematic summaries.\n"
+-            f"2. 'search_keywords': Provide a list of 3 to 5 highly specific stock video search phrases (2 to 4 words each) strictly tailored for video libraries like Pexels.\n"
++            f"1. 'primary_subject': The single concrete physical entity or object filmed in this scene (e.g. 'dry seed in soil', 'emerging root tip', 'cooking oil in pan', 'water simmering in kettle'). Must be specific to this exact scene beat, NOT the overall video title.\n"
++            f"2. 'visual_prompt': Describe a single, concrete, observable physical action happening right now on screen. Specify the exact primary subject, physical motion, camera angle/framing (e.g., extreme close-up, macro shot, low angle, aerial view), setting, and natural lighting. Focus strictly on visible physical actions. Do NOT use abstract concepts, metaphors, or broad thematic summaries.\n"
++            f"3. 'search_keywords': Provide a list of 3 to 5 highly specific stock video search phrases (2 to 4 words each) strictly tailored for video libraries like Pexels.\n"
+             f"   - Prioritize concrete subjects, visible physical motions, and camera perspectives (e.g., 'macro timelapse', 'close up', 'underground').\n"
+             f"   - Every keyword MUST directly depict the literal subject and action described in this narration beat.\n"
+             f"   - STRICTLY FORBIDDEN: Do NOT include broad thematic concepts, historical/cultural associations, human activities not mentioned in the beat, or generic meta-tags (e.g., FORBIDDEN: 'ancient farmers', 'agricultural history', 'cultural ceremony', 'nature documentary', 'cinematic landscape').\n"
+             f"   - Do NOT invent unrelated characters or events.\n"
+-            f"3. 'action_timeline': Provide a chronological list of 1 to 2 specific action events for this beat.\n"
++            f"4. SCIENTIFIC & BIOLOGICAL ACCURACY CONSTRAINTS:\n"
++            f"   - PLANT ROOT & SHOOT GROWTH DIRECTION (GRAVITROPISM & PHOTOTROPISM):\n"
++            f"     * ROOTS (radicle, root tip, taproot): Plant roots exhibit positive gravitropism. Roots ALWAYS grow and push DOWNWARD into soil/substrate or dark earth. NEVER describe roots growing upward or toward the surface/sky.\n"
++            f"     * SHOOTS & STEMS (hypocotyl, epicotyl, plumule): Stems and leaves exhibit positive phototropism and negative gravitropism. Shoots ALWAYS grow UPWARD toward the light/sun/sky.\n"
++            f"   - DEVELOPMENTAL STAGE INTEGRITY:\n"
++            f"     * A dormant, dry, or imbibing seed must be depicted as a seed (e.g., dry seed resting in soil, swelling seed coat). STRICTLY FORBIDDEN: Do NOT depict an already-grown green seedling, leafy plant, or nursery tray of sprouts when the narration describes a dry seed absorbing water or resting in soil.\n"
++            f"     * Underground root emergence occurs beneath or at the soil surface; young roots are pale, translucent, or whitish. Do NOT depict green leafy foliage for subterranean root emergence.\n"
++            f"   - BIOCHEMICAL, MOLECULAR & UNFILMABLE INTERNAL PROCESSES:\n"
++            f"     * Internal biochemical processes (enzymes activating, food breakdown, starch converting to glucose, cellular respiration, ATP production, DNA replication, molecular binding) happen at the cellular/molecular level and CANNOT be filmed with a normal camera in stock footage.\n"
++            f"     * DO NOT invent fake kitchen or laboratory physical actions (FORBIDDEN: pouring water into drinking glasses, mixing chemicals in glass bowls, laboratory beakers) to represent internal cellular or plant biology!\n"
++            f"     * If the narration describes an internal biochemical process: specify a truthful, macroscopic observable physical manifestation (e.g. 'Observable macro timelapse of seed coat swelling and softening as water saturates the dormant seed in soil') with concrete search keywords (e.g. ['seed coat swelling', 'seed absorbing water timelapse']). If no truthful observable manifestation exists, specify the subject accurately and note that an internal diagram is required.\n"
++            f"5. 'action_timeline': Provide a chronological list of 1 to 2 specific action events for this beat.\n"
+             f"   Each action event must contain:\n"
+             f"   - 'action_description': clear physical action visible in the shot.\n"
+             f"   - 'visual_start_seconds': provisional start time relative to scene start (starting at 0.0).\n"
+@@ -715,7 +737,7 @@ class GroqScriptProvider(ScriptProvider):
+             f"   - Naturally silent actions (e.g., seeds resting in soil, roots pushing downward underground, cell division, leaves gently unfolding) DO NOT generate audible impacts! Set sound_type='none' and sfx_query=null for naturally silent biological growth.\n"
+             f"   - STRICTLY FORBIDDEN: Do NOT invent dramatic cracking, explosions, crunching, or fictional sci-fi sounds for silent biological processes.\n"
+             f"   - Use sound_type='ambience' only when an environmental background sound naturally accompanies the shot (e.g. soft rain falling, gentle wind rustle).\n"
+-            f"4. 'shot_plan': For scenes containing multiple distinct physical actions, provide a sequential list of sub-scene camera shots (maximum 4 shots).\n"
++            f"6. 'shot_plan': For scenes containing multiple distinct physical actions, provide a sequential list of sub-scene camera shots (maximum 4 shots).\n"
+             f"   SHOT PLANNING RULES:\n"
+             f"   - SINGLE-ACTION SCENES: If the scene narration describes only one observable physical action or continuous state, set \"shot_plan\": null (or omit it). Do NOT split a single continuous action into redundant shots.\n"
+             f"   - MULTI-ACTION SCENES: If the narration contains two distinct sequential physical actions (e.g., \"Pour oil into the hot pan, then add sliced carrots\"), create 2 shots. If it contains three distinct observable actions and duration permits, create 3 shots.\n"
+@@ -747,6 +769,7 @@ class GroqScriptProvider(ScriptProvider):
+             f"Do NOT write any introductory remarks, notes, or explanations before or after the JSON. Return ONLY a valid JSON object starting with '{{' and ending with '}}' matching one of these structures:\n\n"
+             f"Multi-action scene example (2 distinct actions):\n"
+             f"{{\n"
++            f"  \"primary_subject\": \"cooking oil in pan\",\n"
+             f"  \"visual_prompt\": \"Cinematic macro close-up of cooking oil poured into a hot pan, followed by crisp sliced carrots added to sizzle.\",\n"
+             f"  \"search_keywords\": [\"pouring oil pan\", \"cooking carrots wok\", \"vegetable stir fry skillet\"],\n"
+             f"  \"action_timeline\": [\n"
+@@ -806,6 +829,7 @@ class GroqScriptProvider(ScriptProvider):
+             f"}}\n\n"
+             f"Single-action scene example:\n"
+             f"{{\n"
++            f"  \"primary_subject\": \"simmering water in kettle\",\n"
+             f"  \"visual_prompt\": \"Cinematic macro close-up of water simmering in a stainless steel kettle\",\n"
+             f"  \"search_keywords\": [\"water simmering kettle\", \"boiling water steam close up\"],\n"
+             f"  \"action_timeline\": [\n"
+diff --git a/app/services/providers/ollama_script_provider.py b/app/services/providers/ollama_script_provider.py
+index 73e0bf6..e498755 100644
+--- a/app/services/providers/ollama_script_provider.py
++++ b/app/services/providers/ollama_script_provider.py
+@@ -210,20 +210,21 @@ class OllamaScriptProvider(ScriptProvider):
+         
+         # Enhanced initial prompt emphasizing target length and thorough content
+         prompt = (
+-            f"You are a master documentary scriptwriter crafting a rich, immersive spoken narration.\n"
++            f"You are a clear, practical scriptwriter writing plain spoken narration for a short explainer video.\n"
+             f"Write a full narration script for a video about: \"{topic}\".\n\n"
+             f"TARGET DURATION: {desired_duration_seconds} seconds.\n"
+             f"TARGET LENGTH: AT LEAST {target_words} WORDS (approx. {target_words} to {int(target_words * 1.15)} words).\n\n"
+             f"CONTENT INSTRUCTIONS:\n"
+             f"- Provide a comprehensive, detailed story covering origins, key historical moments, cultural significance, anecdotes, major developments, and a strong conclusion.\n"
+-            f"- It is CRITICAL that the text is detailed and lengthy enough to reach the target word count of AT LEAST {target_words} words.\n\n"
++            f"- The text must be long enough to reach the target word count of AT LEAST {target_words} words.\n\n"
+             f"STRICT FORMATTING RULES:\n"
+             f"1. Return ONLY the spoken narration text. Do not include intro/outro conversational remarks.\n"
+             f"2. Do NOT include any titles, headers, or section names.\n"
+             f"3. Do NOT include any bullet points or numbered lists.\n"
+             f"4. Do NOT include any Markdown formatting.\n"
+             f"5. Do NOT include any stage directions, narrator tags, or visual cues (e.g. no '[Music]', '(Narrator:)', 'Scene 1:').\n"
+-            f"6. Make the narration continuous, naturally spoken, and rich in detail to fulfill the {target_words} words target.\n\n"
++            f"6. Make the narration continuous and naturally spoken. Reach the word target by adding concrete facts, steps and cause-and-effect, never decorative language.\n"
++            f"7. Write in direct, concrete sentences about what happens and why. Do NOT write poetic or ornate prose, do NOT use flowery adjectives or metaphors (e.g. 'tender', 'whispers', 'dances'), and do NOT describe camera views or how things look on screen.\n\n"
+             f"Spoken Narration Script:"
+         )
+ 
+diff --git a/app/services/providers/pexels_video_provider.py b/app/services/providers/pexels_video_provider.py
+index 2346d6b..5682cff 100644
+--- a/app/services/providers/pexels_video_provider.py
++++ b/app/services/providers/pexels_video_provider.py
+@@ -822,7 +822,10 @@ class PexelsVideoProvider(StockMediaProvider):
+             "score": round(total_score, 2),
+             "technical_score": round(technical_score, 2),
+             "semantic_score": round(semantic_score, 2),
+-            "semantic_reasons": semantic_reasons
++            "semantic_reasons": semantic_reasons,
++            # The clip's own descriptive text (URL slug, title, tags). This is the only
++            # text the visual verifier may treat as evidence about what the clip shows.
++            "clip_text": self._extract_video_metadata_text(video),
+         }
+ 
+     async def search_media_candidates(
+@@ -922,6 +925,7 @@ class PexelsVideoProvider(StockMediaProvider):
+                             "semantic_score": cand["semantic_score"],
+                             "technical_score": cand["technical_score"],
+                             "semantic_reasons": cand["semantic_reasons"],
++                            "clip_text": cand.get("clip_text", ""),
+                             "global_candidates_evaluated": len(candidates_list)
+                         }
+                     ))
+@@ -985,7 +989,8 @@ class PexelsVideoProvider(StockMediaProvider):
+                                 "score": cand["score"],
+                                 "semantic_score": cand["semantic_score"],
+                                 "technical_score": cand["technical_score"],
+-                                "semantic_reasons": cand["semantic_reasons"]
++                                "semantic_reasons": cand["semantic_reasons"],
++                                "clip_text": cand.get("clip_text", "")
+                             }
+                         ))
+                     return results
+diff --git a/app/services/video_assembly.py b/app/services/video_assembly.py
+index caf0ef4..ac43d31 100644
+--- a/app/services/video_assembly.py
++++ b/app/services/video_assembly.py
+@@ -20,7 +20,11 @@ from moviepy import (
+     afx
+ )
+ 
+-def ensure_resampled_audio(audio_path: str, target_dir: str = "c:/AiVideoGenerator/media/audio_resampled") -> str:
++# Portable default (no machine-specific drive paths). The pipeline always passes a
++# per-project directory; this is only a fallback for standalone use.
++DEFAULT_RESAMPLED_DIR = os.path.join(os.getenv("MEDIA_STORAGE_PATH", "./media"), "audio_resampled")
++
++def ensure_resampled_audio(audio_path: str, target_dir: str = DEFAULT_RESAMPLED_DIR) -> str:
+     """
+     Resample input audio file to 44100 Hz stereo 16-bit PCM WAV using PyAV.
+     Preserves real-world pitch and spoken duration exactly.
+@@ -29,7 +33,13 @@ def ensure_resampled_audio(audio_path: str, target_dir: str = "c:/AiVideoGenerat
+     filename = os.path.splitext(os.path.basename(audio_path))[0] + "_44k.wav"
+     output_wav = os.path.join(target_dir, filename)
+ 
+-    if os.path.exists(output_wav) and os.path.getsize(output_wav) > 1000:
++    # Reuse the cached WAV only if it is not older than its source (avoids stale audio
++    # when a scene's narration is regenerated under the same filename).
++    if (
++        os.path.exists(output_wav)
++        and os.path.getsize(output_wav) > 1000
++        and os.path.getmtime(output_wav) >= os.path.getmtime(audio_path)
++    ):
+         return output_wav
+ 
+     in_container = av.open(audio_path)
+@@ -694,7 +704,7 @@ def mix_scene_audio_pcm(
+     ambient_audio_path: Optional[str],
+     exact_duration: float,
+     scene_order: int,
+-    target_dir: str = "c:/AiVideoGenerator/media/audio_resampled"
++    target_dir: str = DEFAULT_RESAMPLED_DIR
+ ) -> str:
+     """
+     Direct PCM numpy audio stream mixing for three independent layers:
+@@ -936,7 +946,7 @@ def assemble_video(
+     if not scenes:
+         raise ValueError("Cannot assemble video with empty scenes list.")
+ 
+-    target_resampled_dir = resampled_dir or "c:/AiVideoGenerator/media/audio_resampled"
++    target_resampled_dir = resampled_dir or DEFAULT_RESAMPLED_DIR
+ 
+     sorted_scenes = sorted(scenes, key=lambda x: x["scene_order"])
+     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+diff --git a/app/services/visual_verification.py b/app/services/visual_verification.py
+index 4cd2887..2191ec5 100644
+--- a/app/services/visual_verification.py
++++ b/app/services/visual_verification.py
+@@ -272,17 +272,25 @@ class ConceptClassifier:
+     """
+ 
+     CONCEPTUAL_ABSTRACT_KEYWORDS = {
++        # Biochemical & Enzymatic
++        "enzyme", "enzymes", "enzymatic", "catalyst", "catalysis",
++        "starch breakdown", "stored food into", "simple sugars", "glucose conversion",
++        "glucose", "cellular respiration", "atp synthesis", "glycolysis", "metabolism",
++        "metabolic", "protein synthesis", "transcription", "translation",
++        "osmosis", "molecular diffusion", "active transport", "hormone signaling",
++        "gibberellin", "auxin transport", "biochemical",
+         # Microscopic / Cellular
+         "microscopic", "cellular", "cell division", "mitosis", "meiosis", "chloroplast",
+         "chlorophyll", "photosynthesis", "dna", "rna", "ribosome", "mitochondria",
+         "atom", "atomic", "electron", "proton", "neutron", "quantum", "molecule",
++        "molecular",
+         # Internal mechanical
+         "internal combustion", "piston inside", "cylinder stroke", "four stroke cycle",
+         "valve timing", "crankshaft rotation inside", "fuel injection chamber",
+         "spark plug ignition cylinder", "inside the engine", "engine cross section",
+         # Abstract scientific / physical
+         "chemical reaction equation", "thermodynamics diagram", "gravity wave",
+-        "electromagnetic spectrum", "magnetic field lines"
++        "electromagnetic spectrum", "magnetic field lines", "subatomic"
+     }
+ 
+     @classmethod
+@@ -335,16 +343,16 @@ class HeuristicVisualVerifier:
+         explicit_exclusions = [str(e).strip().lower() for e in (shot_requirements.get("explicit_exclusions") or []) if e]
+ 
+         candidate_meta = candidate_metadata or {}
+-        cand_text = " ".join([
+-            str(candidate_meta.get("keyword_used") or ""),
+-            str(candidate_meta.get("search_query") or ""),
+-            str(candidate_meta.get("query") or ""),
+-            str(candidate_meta.get("photographer") or ""),
+-            str(candidate_meta.get("source_url") or ""),
+-            " ".join(candidate_meta.get("semantic_reasons") or []),
++        # EVIDENCE RULE: only text that describes the clip itself may count as evidence.
++        # The search query (keyword_used / search_query / query) is how the clip was FOUND,
++        # so matching the requirements against it is circular and proves nothing. The
++        # photographer name and the provider's own score reasons are likewise not evidence.
++        # Those fields are kept in the metadata for logging only.
++        cand_text = re.sub(r'[^\w\s]', ' ', " ".join([
++            str(candidate_meta.get("clip_text") or ""),
+             str(candidate_meta.get("title") or ""),
+             str(candidate_meta.get("tags") or "")
+-        ]).lower()
++        ]).lower())
+ 
+         # 1. Frame extraction inspection
+         frame_arrays = [arr for _, _, arr in frames]
+@@ -385,7 +393,33 @@ class HeuristicVisualVerifier:
+             if re.search(r'\b' + re.escape(excl) + r'\b', cand_text):
+                 contradictions.append(f"Explicit exclusion matched in candidate: '{excl}'")
+ 
+-        # 3. Subject and Object verification
++        # 3. Scientific Contradiction Checks
++        # A. Dry / dormant seed vs grown seedling or foliage
++        is_dry_seed_req = any(term in req_subject or term in req_action for term in (
++            "dry seed", "dormant seed", "unsprouted seed", "seed imbibition", "seed water absorption", "seed in soil"
++        )) or ("seed" in req_subject and any(w in req_action for w in ("absorb", "water enters", "swelling", "resting in soil")))
++
++        if is_dry_seed_req:
++            seedling_terms = ("seedling", "seedlings", "sprout", "sprouts", "sprouted", "foliage", "leaves", "green plant", "microgreens", "nursery tray")
++            matched_seedling = [term for term in seedling_terms if re.search(r'\b' + re.escape(term) + r'\b', cand_text)]
++            if matched_seedling:
++                contradictions.append(
++                    f"Developmental stage contradiction: candidate depicts grown plant/seedling "
++                    f"({matched_seedling}) for dry/dormant seed requirement"
++                )
++
++        # B. Plant root emergence vs above-ground foliage without roots
++        is_root_req = any(term in req_subject or term in req_action for term in ("root", "radicle", "taproot", "root tip"))
++        if is_root_req:
++            foliage_only_terms = ("canopy", "treetop", "flower blossom", "fruit", "green salad", "foliage")
++            matched_foliage = [term for term in foliage_only_terms if re.search(r'\b' + re.escape(term) + r'\b', cand_text)]
++            if matched_foliage and not any(r in cand_text for r in ("root", "roots", "soil", "dirt", "underground")):
++                contradictions.append(
++                    f"Botanical contradiction: candidate depicts above-ground foliage ({matched_foliage}) "
++                    f"without roots or soil for root emergence requirement"
++                )
++
++        # 4. Subject and Object verification
+         subject_tokens = [w for w in re.split(r'\W+', req_subject) if len(w) > 2 and w not in ("and", "the", "with", "for", "from")]
+         matched_subjs = [w for w in subject_tokens if re.search(r'\b' + re.escape(w) + r'\b', cand_text)]
+         
+@@ -405,7 +439,26 @@ class HeuristicVisualVerifier:
+             else:
+                 uncertainties.append(f"Required object '{req_obj}' not verified in candidate description")
+ 
+-        # 4. Setting verification
++        # Action verification (independent of the subject): does the clip's own text mention
++        # the required visible action? Light stemming so "pouring" matches "pour"/"pours".
++        action_stop = {"the", "and", "with", "into", "from", "that", "this", "onto", "over", "while"}
++        def _stem(w: str) -> str:
++            return re.sub(r'(ing|ed|es|s)$', '', w) if len(w) > 4 else w
++        cand_words = set(w for w in re.split(r'\W+', cand_text) if w)
++        subject_stems = {_stem(w) for w in subject_tokens}
++        # A word that is already part of the subject must not also count as action evidence
++        action_tokens = [
++            w for w in re.split(r'\W+', req_action)
++            if len(w) > 3 and w not in action_stop and _stem(w) not in subject_stems
++        ]
++        matched_actions = [
++            w for w in action_tokens
++            if len(_stem(w)) >= 3 and any(cw.startswith(_stem(w)) for cw in cand_words)
++        ]
++        if matched_actions:
++            confirmed_matches.append(f"Action terms matched: {matched_actions}")
++
++        # 5. Setting verification
+         setting_tokens = [w for w in re.split(r'\W+', req_setting) if len(w) > 2 and w not in ("and", "the", "with", "for", "from")]
+         matched_settings = [w for w in setting_tokens if re.search(r'\b' + re.escape(w) + r'\b', cand_text)]
+         if matched_settings:
+@@ -424,7 +477,7 @@ class HeuristicVisualVerifier:
+                 elif domain == "kitchen" and any(k in req_setting or k in req_subject for k in ("engine", "construction", "underground", "soil")):
+                     contradictions.append("Kitchen setting footage selected for industrial or botanical scene")
+ 
+-        # 5. Feasibility check for conceptual/abstract shots
++        # 6. Feasibility check for conceptual/abstract shots & Unrelated Substitution Prevention
+         feasibility, feas_reason = ConceptClassifier.classify_feasibility(
+             req_action, req_subject, shot_requirements.get("visual_prompt", "")
+         )
+@@ -434,7 +487,24 @@ class HeuristicVisualVerifier:
+             if any(term in req_action for term in ("cylinder", "piston", "internal combustion")) and "driving" in cand_text:
+                 contradictions.append("Generic exterior driving footage cannot depict internal engine cylinder mechanics")
+ 
+-        # 6. Scoring & Decision
++            # Prevention of substituting unrelated physical actions for abstract scientific / biochemical processes
++            is_biochemical_process = any(term in req_subject or term in req_action for term in (
++                "enzyme", "enzymes", "biochemical", "molecular", "starch breakdown",
++                "cellular respiration", "glucose", "metabolism"
++            ))
++            if is_biochemical_process:
++                unrelated_domestic_terms = (
++                    "glass", "drinking", "kitchen", "cook", "cooking", "beverage",
++                    "cocktail", "faucet", "sink", "dishwasher", "wine", "tea", "dining", "restaurant"
++                )
++                matched_domestic = [term for term in unrelated_domestic_terms if re.search(r'\b' + re.escape(term) + r'\b', cand_text)]
++                if matched_domestic:
++                    contradictions.append(
++                        f"Physical substitution contradiction: candidate depicts unrelated domestic action "
++                        f"({matched_domestic}) for abstract biochemical process"
++                    )
++
++        # 7. Scoring & Decision
+         has_subject_confirmed = any("Subject terms matched" in m for m in confirmed_matches)
+ 
+         if contradictions:
+@@ -447,27 +517,20 @@ class HeuristicVisualVerifier:
+             confidence = 0.45
+             evidence.append(f"UNCERTAIN candidate: primary subject '{req_subject}' not confirmed ({'; '.join(uncertainties)})")
+         elif len(confirmed_matches) >= 2:
++            # Subject confirmed AND at least one independent corroboration
++            # (action, setting or required object) from the clip's own text.
+             status = VerificationStatus.ACCEPTED
+-            confidence = min(0.95, 0.70 + (0.05 * len(confirmed_matches)))
++            confidence = min(0.90, 0.65 + (0.05 * len(confirmed_matches)))
+             evidence.append(f"ACCEPTED candidate: verified matches for {'; '.join(confirmed_matches)}")
+-        elif len(confirmed_matches) == 1:
+-            status = VerificationStatus.ACCEPTED
+-            confidence = 0.75
+-            evidence.append(f"ACCEPTED candidate with confirmed match: {confirmed_matches[0]}")
+-        elif candidate_meta.get("semantic_score", 0.0) >= 40.0:
+-            status = VerificationStatus.ACCEPTED
+-            confidence = 0.70
+-            confirmed_matches.append("Upstream provider verified semantic alignment")
+-            evidence.append("ACCEPTED candidate based on strong upstream alignment without contradictions")
+-        elif not cand_text.strip() and motion_delta >= 0.0:
+-            status = VerificationStatus.ACCEPTED
+-            confidence = 0.70
+-            confirmed_matches.append("Decoded video stream validated")
+-            evidence.append("ACCEPTED candidate based on valid decoded video stream")
+         else:
++            # Subject alone is not enough: a bare noun ("seeds", "hands") appears in
++            # many unrelated clips. Needs corroboration or a human decision.
+             status = VerificationStatus.UNCERTAIN
+             confidence = 0.50
+-            evidence.append("UNCERTAIN candidate: balanced evidence requiring review")
++            evidence.append(
++                f"UNCERTAIN candidate: subject confirmed but no independent action/setting/object "
++                f"evidence in the clip's own description ({'; '.join(uncertainties)})"
++            )
+ 
+         rec_strategy = "diagram_or_motion_graphic" if feasibility == ConceptFeasibility.CONCEPTUAL_ABSTRACT else None
+ 

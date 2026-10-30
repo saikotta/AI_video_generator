@@ -402,25 +402,46 @@ class PexelsVideoProvider(StockMediaProvider):
         action = ctx.get("primary_action", "")
         setting = ctx.get("setting", "")
 
-        if state and subject and action:
-            q_state = f"{state} {subject} {action}".strip()
-            if q_state and q_state not in enriched:
+        # Only use concise action terms (<= 4 words) to prevent prompt sentence contamination
+        concise_action = action.strip() if action and len(action.strip().split()) <= 4 else ""
+        concise_state = state.strip() if state and len(state.strip().split()) <= 4 else ""
+        concise_subject = subject.strip() if subject and len(subject.strip().split()) <= 4 else ""
+        concise_setting = setting.strip() if setting and len(setting.strip().split()) <= 4 else ""
+
+        if concise_state and concise_subject and concise_action:
+            q_state = f"{concise_state} {concise_subject} {concise_action}".strip()
+            if q_state and q_state not in enriched and len(q_state.split()) <= 6:
                 enriched.append(q_state)
 
-        if action and subject and setting:
-            if setting != subject:
-                q_setting = f"{action} {subject} {setting}".strip()
-                if q_setting and q_setting not in enriched:
+        if concise_action and concise_subject and concise_setting:
+            if concise_setting != concise_subject:
+                q_setting = f"{concise_action} {concise_subject} {concise_setting}".strip()
+                if q_setting and q_setting not in enriched and len(q_setting.split()) <= 6:
                     enriched.append(q_setting)
-        elif subject and setting and setting != subject:
-            q_sub_set = f"{subject} on {setting}".strip()
-            if q_sub_set and q_sub_set not in enriched:
+        elif concise_subject and concise_setting and concise_setting != concise_subject:
+            q_sub_set = f"{concise_subject} on {concise_setting}".strip()
+            if q_sub_set and q_sub_set not in enriched and len(q_sub_set.split()) <= 6:
                 enriched.append(q_sub_set)
 
         for kw in keywords:
             clean_kw = kw.strip()
-            if clean_kw and clean_kw not in enriched:
+            # If a keyword itself is too long (> 6 words), skip it from direct search query
+            if clean_kw and clean_kw not in enriched and len(clean_kw.split()) <= 6:
                 enriched.append(clean_kw)
+
+        # Botanical domain synonym fallbacks when botanical context is detected
+        all_text = f"{subject} {action} {setting} {' '.join(keywords)}".lower()
+        if any(term in all_text for term in ("seed", "germination", "sprout", "imbibition")):
+            botanical_fallbacks = [
+                "seed germination time lapse",
+                "watering seed in soil",
+                "germinating seed close up",
+                "seed sprouting time lapse",
+                "seed absorbing water macro"
+            ]
+            for b_kw in botanical_fallbacks:
+                if b_kw not in enriched:
+                    enriched.append(b_kw)
 
         return enriched
 
@@ -703,7 +724,7 @@ class PexelsVideoProvider(StockMediaProvider):
             return None
 
         video_id = video.get("id")
-        if not video_id or video_id in used_video_ids:
+        if not video_id or video_id in used_video_ids or str(video_id) in used_video_ids:
             return None
 
         width = video.get("width", 0)
@@ -822,7 +843,10 @@ class PexelsVideoProvider(StockMediaProvider):
             "score": round(total_score, 2),
             "technical_score": round(technical_score, 2),
             "semantic_score": round(semantic_score, 2),
-            "semantic_reasons": semantic_reasons
+            "semantic_reasons": semantic_reasons,
+            # The clip's own descriptive text (URL slug, title, tags). This is the only
+            # text the visual verifier may treat as evidence about what the clip shows.
+            "clip_text": self._extract_video_metadata_text(video),
         }
 
     async def search_media_candidates(
@@ -853,142 +877,99 @@ class PexelsVideoProvider(StockMediaProvider):
         # 2. Context-aware search query enrichment
         search_queries = self._enrich_search_queries(cleaned_keywords, ctx)
 
-        # 3. Global Candidate Pool: Search bounded pool of top 3 query variants
-        bounded_queries = search_queries[:3]
+        # 3. Search candidate queries until max_candidates reached or queries exhausted
         collected_candidates: Dict[int, Dict[str, Any]] = {}
+        searched_queries: Set[str] = set()
+        max_total_api_calls = 8  # Safety bound to prevent runaway quota consumption
+        api_calls_count = 0
 
         async with httpx.AsyncClient(timeout=15.0) as client:
-            for kw in bounded_queries:
-                params = {"query": kw, "per_page": 15, "orientation": "landscape"}
-                try:
-                    data = await self._make_api_request(client, self.PEXELS_VIDEO_SEARCH_URL, params)
-                except (PexelsAuthenticationError, PexelsRateLimitError):
-                    raise
-                except Exception as e:
-                    logger.warning(f"Pexels search error for keyword '{kw}': {e}")
+            for kw in search_queries:
+                if len(collected_candidates) >= max_candidates:
+                    break
+                if api_calls_count >= max_total_api_calls:
+                    break
+                if kw in searched_queries:
                     continue
+                searched_queries.add(kw)
 
-                videos = data.get("videos") or []
-                if not videos:
-                    continue
+                # Bounded pagination: check page 1, and page 2 only if needed
+                for page in (1, 2):
+                    if len(collected_candidates) >= max_candidates:
+                        break
+                    if api_calls_count >= max_total_api_calls:
+                        break
 
-                for video in videos:
-                    if not isinstance(video, dict):
-                        continue
-                    v_id = video.get("id")
-                    if not v_id or v_id in active_used_ids:
-                        continue
+                    params = {"query": kw, "per_page": 15, "page": page, "orientation": "landscape"}
+                    api_calls_count += 1
+                    try:
+                        data = await self._make_api_request(client, self.PEXELS_VIDEO_SEARCH_URL, params)
+                    except (PexelsAuthenticationError, PexelsRateLimitError):
+                        raise
+                    except Exception as e:
+                        logger.warning(f"Pexels search error for keyword '{kw}' (page {page}): {e}")
+                        break
 
-                    if v_id in collected_candidates:
-                        continue
+                    videos = data.get("videos") or []
+                    if not videos:
+                        break
 
-                    candidate = self._evaluate_video(
-                        video, target_duration, active_used_ids, query=kw, scene_context=ctx
-                    )
-                    if candidate:
-                        candidate["keyword_matched"] = kw
-                        collected_candidates[v_id] = candidate
+                    for video in videos:
+                        if not isinstance(video, dict):
+                            continue
+                        v_id = video.get("id")
+                        if not v_id or v_id in active_used_ids or str(v_id) in active_used_ids or v_id in collected_candidates:
+                            continue
 
-            # 4. Global Ranking across all collected candidates
-            if collected_candidates:
-                candidates_list = list(collected_candidates.values())
-                candidates_list.sort(
-                    key=lambda c: (
-                        c["score"],
-                        c["semantic_score"],
-                        c["width"] * c["height"],
-                        -c["video_id"]
-                    ),
-                    reverse=True
-                )
+                        candidate = self._evaluate_video(
+                            video, target_duration, active_used_ids, query=kw, scene_context=ctx
+                        )
+                        if candidate:
+                            candidate["keyword_matched"] = kw
+                            collected_candidates[v_id] = candidate
 
-                results = []
-                for cand in candidates_list[:max_candidates]:
-                    results.append(MediaAssetSchema(
-                        asset_type="video",
-                        provider="pexels",
-                        source_url=cand["source_url"],
-                        download_url=cand["download_url"],
-                        metadata={
-                            "pexels_id": cand["video_id"],
-                            "width": cand["width"],
-                            "height": cand["height"],
-                            "duration": cand["duration"],
-                            "orientation": cand["orientation"],
-                            "aspect_ratio": cand["aspect_ratio"],
-                            "photographer": cand["photographer"],
-                            "keyword_used": cand.get("keyword_matched") or bounded_queries[0],
-                            "score": cand["score"],
-                            "semantic_score": cand["semantic_score"],
-                            "technical_score": cand["technical_score"],
-                            "semantic_reasons": cand["semantic_reasons"],
-                            "global_candidates_evaluated": len(candidates_list)
-                        }
-                    ))
-                return results
+                    # If page 1 had fewer than 15 videos, there is no page 2
+                    if len(videos) < 15:
+                        break
 
-            # 5. Fallback loop for remaining queries (if any) beyond the top 3
-            for kw in search_queries[3:]:
-                params = {"query": kw, "per_page": 15, "orientation": "landscape"}
-                try:
-                    data = await self._make_api_request(client, self.PEXELS_VIDEO_SEARCH_URL, params)
-                except (PexelsAuthenticationError, PexelsRateLimitError):
-                    raise
-                except Exception as e:
-                    logger.warning(f"Pexels fallback search error for keyword '{kw}': {e}")
-                    continue
+        # 4. Global Ranking across all collected candidates
+        if collected_candidates:
+            candidates_list = list(collected_candidates.values())
+            candidates_list.sort(
+                key=lambda c: (
+                    c["score"],
+                    c["semantic_score"],
+                    c["width"] * c["height"],
+                    -c["video_id"]
+                ),
+                reverse=True
+            )
 
-                videos = data.get("videos") or []
-                if not videos:
-                    continue
-
-                fallback_candidates = []
-                for video in videos:
-                    if not isinstance(video, dict):
-                        continue
-                    v_id = video.get("id")
-                    if not v_id or v_id in active_used_ids:
-                        continue
-                    candidate = self._evaluate_video(
-                        video, target_duration, active_used_ids, query=kw, scene_context=ctx
-                    )
-                    if candidate:
-                        candidate["keyword_matched"] = kw
-                        fallback_candidates.append(candidate)
-
-                if fallback_candidates:
-                    fallback_candidates.sort(
-                        key=lambda c: (
-                            c["score"],
-                            c["semantic_score"],
-                            c["width"] * c["height"],
-                            -c["video_id"]
-                        ),
-                        reverse=True
-                    )
-                    results = []
-                    for cand in fallback_candidates[:max_candidates]:
-                        results.append(MediaAssetSchema(
-                            asset_type="video",
-                            provider="pexels",
-                            source_url=cand["source_url"],
-                            download_url=cand["download_url"],
-                            metadata={
-                                "pexels_id": cand["video_id"],
-                                "width": cand["width"],
-                                "height": cand["height"],
-                                "duration": cand["duration"],
-                                "orientation": cand["orientation"],
-                                "aspect_ratio": cand["aspect_ratio"],
-                                "photographer": cand["photographer"],
-                                "keyword_used": kw,
-                                "score": cand["score"],
-                                "semantic_score": cand["semantic_score"],
-                                "technical_score": cand["technical_score"],
-                                "semantic_reasons": cand["semantic_reasons"]
-                            }
-                        ))
-                    return results
+            results = []
+            for cand in candidates_list[:max_candidates]:
+                results.append(MediaAssetSchema(
+                    asset_type="video",
+                    provider="pexels",
+                    source_url=cand["source_url"],
+                    download_url=cand["download_url"],
+                    metadata={
+                        "pexels_id": cand["video_id"],
+                        "width": cand["width"],
+                        "height": cand["height"],
+                        "duration": cand["duration"],
+                        "orientation": cand["orientation"],
+                        "aspect_ratio": cand["aspect_ratio"],
+                        "photographer": cand["photographer"],
+                        "keyword_used": cand.get("keyword_matched") or search_queries[0],
+                        "score": cand["score"],
+                        "semantic_score": cand["semantic_score"],
+                        "technical_score": cand["technical_score"],
+                        "semantic_reasons": cand["semantic_reasons"],
+                        "clip_text": cand.get("clip_text", ""),
+                        "global_candidates_evaluated": len(candidates_list)
+                    }
+                ))
+            return results
 
         raise NoSuitableMediaFoundError(f"No suitable stock video clip found matching criteria for keywords: {keywords}")
 

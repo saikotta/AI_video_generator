@@ -31,7 +31,9 @@ class OllamaScriptProvider(ScriptProvider):
         self.last_trimming_occurred = False
 
     def calculate_target_words(self, duration_seconds: int) -> int:
-        return int(duration_seconds * self.words_per_minute / 60)
+        # Short videos: measured effective narration speed (incl. scene pauses) is ~109 wpm
+        wpm = min(self.words_per_minute, 108) if duration_seconds <= 30 else self.words_per_minute
+        return int(duration_seconds * wpm / 60)
 
     def clean_script_text(self, text: str) -> str:
         # Remove bracketed stage directions like [Music], (Narrator:), [Scene 1]
@@ -210,20 +212,21 @@ class OllamaScriptProvider(ScriptProvider):
         
         # Enhanced initial prompt emphasizing target length and thorough content
         prompt = (
-            f"You are a master documentary scriptwriter crafting a rich, immersive spoken narration.\n"
+            f"You are a clear, practical scriptwriter writing plain spoken narration for a short explainer video.\n"
             f"Write a full narration script for a video about: \"{topic}\".\n\n"
             f"TARGET DURATION: {desired_duration_seconds} seconds.\n"
             f"TARGET LENGTH: AT LEAST {target_words} WORDS (approx. {target_words} to {int(target_words * 1.15)} words).\n\n"
             f"CONTENT INSTRUCTIONS:\n"
             f"- Provide a comprehensive, detailed story covering origins, key historical moments, cultural significance, anecdotes, major developments, and a strong conclusion.\n"
-            f"- It is CRITICAL that the text is detailed and lengthy enough to reach the target word count of AT LEAST {target_words} words.\n\n"
+            f"- The text must be long enough to reach the target word count of AT LEAST {target_words} words.\n\n"
             f"STRICT FORMATTING RULES:\n"
             f"1. Return ONLY the spoken narration text. Do not include intro/outro conversational remarks.\n"
             f"2. Do NOT include any titles, headers, or section names.\n"
             f"3. Do NOT include any bullet points or numbered lists.\n"
             f"4. Do NOT include any Markdown formatting.\n"
             f"5. Do NOT include any stage directions, narrator tags, or visual cues (e.g. no '[Music]', '(Narrator:)', 'Scene 1:').\n"
-            f"6. Make the narration continuous, naturally spoken, and rich in detail to fulfill the {target_words} words target.\n\n"
+            f"6. Make the narration continuous and naturally spoken. Reach the word target by adding concrete facts, steps and cause-and-effect, never decorative language.\n"
+            f"7. Write in direct, concrete sentences about what happens and why. Do NOT write poetic or ornate prose, do NOT use flowery adjectives or metaphors (e.g. 'tender', 'whispers', 'dances'), and do NOT describe camera views or how things look on screen.\n\n"
             f"Spoken Narration Script:"
         )
 

@@ -22,6 +22,17 @@ class Settings(BaseSettings):
     ENABLE_SCRIPT_CACHE: bool = False
     SCRIPT_PROVIDER: str = "groq"
 
+    # What to do when no candidate clip is verified for a shot:
+    #   "block"       - stop and wait for manual approval (strict, original behaviour)
+    #   "best_effort" - use the best-scoring unverified clip and record it as UNCERTAIN
+    #                   in the scene metadata so it can be reviewed later
+    UNCERTAIN_FOOTAGE_POLICY: str = "block"
+
+    # Shots about abstract/internal processes (enzymes, cellular respiration, ...) cannot be
+    # filmed truthfully with stock footage. When True the pipeline renders a title card for
+    # them instead of stopping or using unrelated footage.
+    ABSTRACT_SHOT_CARD_ENABLED: bool = True
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

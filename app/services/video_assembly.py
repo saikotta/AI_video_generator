@@ -20,7 +20,11 @@ from moviepy import (
     afx
 )
 
-def ensure_resampled_audio(audio_path: str, target_dir: str = "c:/AiVideoGenerator/media/audio_resampled") -> str:
+# Portable default (no machine-specific drive paths). The pipeline always passes a
+# per-project directory; this is only a fallback for standalone use.
+DEFAULT_RESAMPLED_DIR = os.path.join(os.getenv("MEDIA_STORAGE_PATH", "./media"), "audio_resampled")
+
+def ensure_resampled_audio(audio_path: str, target_dir: str = DEFAULT_RESAMPLED_DIR) -> str:
     """
     Resample input audio file to 44100 Hz stereo 16-bit PCM WAV using PyAV.
     Preserves real-world pitch and spoken duration exactly.
@@ -29,7 +33,13 @@ def ensure_resampled_audio(audio_path: str, target_dir: str = "c:/AiVideoGenerat
     filename = os.path.splitext(os.path.basename(audio_path))[0] + "_44k.wav"
     output_wav = os.path.join(target_dir, filename)
 
-    if os.path.exists(output_wav) and os.path.getsize(output_wav) > 1000:
+    # Reuse the cached WAV only if it is not older than its source (avoids stale audio
+    # when a scene's narration is regenerated under the same filename).
+    if (
+        os.path.exists(output_wav)
+        and os.path.getsize(output_wav) > 1000
+        and os.path.getmtime(output_wav) >= os.path.getmtime(audio_path)
+    ):
         return output_wav
 
     in_container = av.open(audio_path)
@@ -694,7 +704,7 @@ def mix_scene_audio_pcm(
     ambient_audio_path: Optional[str],
     exact_duration: float,
     scene_order: int,
-    target_dir: str = "c:/AiVideoGenerator/media/audio_resampled"
+    target_dir: str = DEFAULT_RESAMPLED_DIR
 ) -> str:
     """
     Direct PCM numpy audio stream mixing for three independent layers:
@@ -936,7 +946,7 @@ def assemble_video(
     if not scenes:
         raise ValueError("Cannot assemble video with empty scenes list.")
 
-    target_resampled_dir = resampled_dir or "c:/AiVideoGenerator/media/audio_resampled"
+    target_resampled_dir = resampled_dir or DEFAULT_RESAMPLED_DIR
 
     sorted_scenes = sorted(scenes, key=lambda x: x["scene_order"])
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)

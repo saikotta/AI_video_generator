@@ -70,8 +70,16 @@ class GroqScriptProvider(ScriptProvider):
             self._internal_client = httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_seconds))
         return self._internal_client
 
+    # Measured: edge-tts narration plus the pauses between scenes averages ~109 words/min on
+    # short videos (a 15s request rendered at 18.75s with the old 130 wpm budget).
+    SHORT_VIDEO_EFFECTIVE_WPM = 108
+    SHORT_VIDEO_MAX_SECONDS = 30
+
     def calculate_target_words(self, duration_seconds: int) -> int:
-        return int(round(duration_seconds * self.words_per_minute / 60.0))
+        wpm = self.words_per_minute
+        if duration_seconds <= self.SHORT_VIDEO_MAX_SECONDS:
+            wpm = min(wpm, self.SHORT_VIDEO_EFFECTIVE_WPM)
+        return int(round(duration_seconds * wpm / 60.0))
 
     def clean_script_text(self, text: str) -> str:
         text = re.sub(r'\[.*?\]', '', text)
@@ -437,12 +445,17 @@ class GroqScriptProvider(ScriptProvider):
     def _classify_topic(cls, topic: str) -> str:
         t_lower = topic.lower()
 
-        # 1. Historical topics (explicitly requesting history, origins, eras, civilizations)
+        # 1. Historical topics that EXPLICITLY ask for history (strong signals only).
+        # Weak era words such as "ancient" or "century" are handled after the
+        # science/cooking/technology checks, so "ancient seed germination" is science.
         history_keywords = [
-            "history", "historical", "ancient", "origin of", "origins of",
-            "empire", "dynasty", "century", "civilization", "revolution",
-            "medieval", "renaissance", "war of", "world war", "battle of",
-            "antiquity", "archaeology", "historical origins"
+            "history", "historical", "origin of", "origins of",
+            "empire", "dynasty", "civilization", "revolution",
+            "war of", "world war", "battle of",
+            "archaeology", "historical origins"
+        ]
+        weak_history_keywords = [
+            "ancient", "century", "medieval", "renaissance", "antiquity"
         ]
         if any(re.search(r'\b' + re.escape(kw) + r'\b', t_lower) for kw in history_keywords):
             return "history"
@@ -483,6 +496,10 @@ class GroqScriptProvider(ScriptProvider):
         ]
         if any(re.search(r'\b' + re.escape(kw) + r'\b', t_lower) for kw in tech_keywords):
             return "technology"
+
+        # 4b. Weak history signals only win when no subject-matter category matched above
+        if any(re.search(r'\b' + re.escape(kw) + r'\b', t_lower) for kw in weak_history_keywords):
+            return "history"
 
         # 5. Creative storytelling / narrative fiction
         story_keywords = [
@@ -575,20 +592,21 @@ class GroqScriptProvider(ScriptProvider):
             min_target_words = int(target_words * 0.90)
 
         prompt = (
-            f"You are a master documentary scriptwriter crafting a rich, immersive spoken narration.\n"
+            f"You are a clear, practical scriptwriter writing plain spoken narration for a short explainer video.\n"
             f"Write a full narration script for a video about: \"{topic}\".\n\n"
             f"TARGET DURATION: {desired_duration_seconds} seconds.\n"
             f"TARGET LENGTH: AT LEAST {target_words} WORDS (approx. {target_words} to {max_target_words} words).\n\n"
             f"CONTENT INSTRUCTIONS:\n"
             f"{content_instructions}\n"
-            f"- It is CRITICAL that the text is detailed and lengthy enough to reach the target word count of AT LEAST {target_words} words.\n\n"
+            f"- The text must be long enough to reach the target word count of AT LEAST {target_words} words.\n\n"
             f"STRICT FORMATTING RULES:\n"
             f"1. Return ONLY the spoken narration text. Do not include intro/outro conversational remarks.\n"
             f"2. Do NOT include any titles, headers, or section names.\n"
             f"3. Do NOT include any bullet points or numbered lists.\n"
             f"4. Do NOT include any Markdown formatting.\n"
             f"5. Do NOT include any stage directions, narrator tags, or visual cues (e.g. no '[Music]', '(Narrator:)', 'Scene 1:').\n"
-            f"6. Make the narration continuous, naturally spoken, and rich in detail to fulfill the {target_words} words target.\n\n"
+            f"6. Make the narration continuous and naturally spoken. Reach the word target by adding concrete facts, steps and cause-and-effect, never decorative language.\n"
+            f"7. Write in direct, concrete sentences about what happens and why. Do NOT write poetic or ornate prose, do NOT use flowery adjectives or metaphors (e.g. 'tender', 'whispers', 'dances'), and do NOT describe camera views or how things look on screen.\n\n"
             f"Spoken Narration Script:"
         )
 
@@ -680,7 +698,8 @@ class GroqScriptProvider(ScriptProvider):
 
     async def generate_visual_specification(
         self,
-        scene_text: str
+        scene_text: str,
+        context: Optional[str] = None,
     ) -> dict:
         if not scene_text or not scene_text.strip():
             raise InvalidScriptResponseError("Cannot generate visual specification for empty scene text.")
@@ -688,19 +707,41 @@ class GroqScriptProvider(ScriptProvider):
         word_count = len(scene_text.split())
         est_duration = round(max(3.0, word_count * 60.0 / self.words_per_minute), 1)
 
+        context_block = ""
+        if context and context.strip():
+            context_block = (
+                f"VIDEO CONTEXT (for reference resolution only):\n{context.strip()}\n\n"
+                "Use the topic and full narration to understand pronouns and continuity. "
+                "Do not substitute the overall topic for the subject of this scene. "
+                "Do not invent actions that are absent from this scene narration.\n\n"
+            )
+
         prompt = (
             f"You are a visual cinematography director for high-end documentary video production.\n"
             f"Craft a concrete, action-focused visual specification for the following spoken narration scene beat.\n\n"
+            f"{context_block}"
             f"SCENE NARRATION:\n\"{scene_text.strip()}\"\n"
             f"PROVISIONAL SCENE DURATION: approx. {est_duration} seconds.\n\n"
             f"INSTRUCTIONS:\n"
-            f"1. 'visual_prompt': Describe a single, concrete, observable physical action happening right now on screen. Specify the exact primary subject, physical motion, camera angle/framing (e.g., extreme close-up, macro shot, low angle, aerial view), setting, and natural lighting. Focus strictly on visible physical actions. Do NOT use abstract concepts, metaphors, or broad thematic summaries.\n"
-            f"2. 'search_keywords': Provide a list of 3 to 5 highly specific stock video search phrases (2 to 4 words each) strictly tailored for video libraries like Pexels.\n"
+            f"1. 'primary_subject': The single concrete physical entity or object filmed in this scene (e.g. 'dry seed in soil', 'emerging root tip', 'cooking oil in pan', 'water simmering in kettle'). Must be specific to this exact scene beat, NOT the overall video title.\n"
+            f"2. 'visual_prompt': Describe a single, concrete, observable physical action happening right now on screen. Specify the exact primary subject, physical motion, camera angle/framing (e.g., extreme close-up, macro shot, low angle, aerial view), setting, and natural lighting. Focus strictly on visible physical actions. Do NOT use abstract concepts, metaphors, or broad thematic summaries.\n"
+            f"3. 'search_keywords': Provide a list of 3 to 5 highly specific stock video search phrases (2 to 4 words each) strictly tailored for video libraries like Pexels.\n"
             f"   - Prioritize concrete subjects, visible physical motions, and camera perspectives (e.g., 'macro timelapse', 'close up', 'underground').\n"
             f"   - Every keyword MUST directly depict the literal subject and action described in this narration beat.\n"
             f"   - STRICTLY FORBIDDEN: Do NOT include broad thematic concepts, historical/cultural associations, human activities not mentioned in the beat, or generic meta-tags (e.g., FORBIDDEN: 'ancient farmers', 'agricultural history', 'cultural ceremony', 'nature documentary', 'cinematic landscape').\n"
             f"   - Do NOT invent unrelated characters or events.\n"
-            f"3. 'action_timeline': Provide a chronological list of 1 to 2 specific action events for this beat.\n"
+            f"4. SCIENTIFIC & BIOLOGICAL ACCURACY CONSTRAINTS:\n"
+            f"   - PLANT ROOT & SHOOT GROWTH DIRECTION (GRAVITROPISM & PHOTOTROPISM):\n"
+            f"     * ROOTS (radicle, root tip, taproot): Plant roots exhibit positive gravitropism. Roots ALWAYS grow and push DOWNWARD into soil/substrate or dark earth. NEVER describe roots growing upward or toward the surface/sky.\n"
+            f"     * SHOOTS & STEMS (hypocotyl, epicotyl, plumule): Stems and leaves exhibit positive phototropism and negative gravitropism. Shoots ALWAYS grow UPWARD toward the light/sun/sky.\n"
+            f"   - DEVELOPMENTAL STAGE INTEGRITY:\n"
+            f"     * A dormant, dry, or imbibing seed must be depicted as a seed (e.g., dry seed resting in soil, swelling seed coat). STRICTLY FORBIDDEN: Do NOT depict an already-grown green seedling, leafy plant, or nursery tray of sprouts when the narration describes a dry seed absorbing water or resting in soil.\n"
+            f"     * Underground root emergence occurs beneath or at the soil surface; young roots are pale, translucent, or whitish. Do NOT depict green leafy foliage for subterranean root emergence.\n"
+            f"   - BIOCHEMICAL, MOLECULAR & UNFILMABLE INTERNAL PROCESSES:\n"
+            f"     * Internal biochemical processes (enzymes activating, food breakdown, starch converting to glucose, cellular respiration, ATP production, DNA replication, molecular binding) happen at the cellular/molecular level and CANNOT be filmed with a normal camera in stock footage.\n"
+            f"     * DO NOT invent fake kitchen or laboratory physical actions (FORBIDDEN: pouring water into drinking glasses, mixing chemicals in glass bowls, laboratory beakers) to represent internal cellular or plant biology!\n"
+            f"     * If the narration describes an internal biochemical process: specify a truthful, macroscopic observable physical manifestation (e.g. 'Observable macro timelapse of seed coat swelling and softening as water saturates the dormant seed in soil') with concrete search keywords (e.g. ['seed coat swelling', 'seed absorbing water timelapse']). If no truthful observable manifestation exists, specify the subject accurately and note that an internal diagram is required.\n"
+            f"5. 'action_timeline': Provide a chronological list of 1 to 2 specific action events for this beat.\n"
             f"   Each action event must contain:\n"
             f"   - 'action_description': clear physical action visible in the shot.\n"
             f"   - 'visual_start_seconds': provisional start time relative to scene start (starting at 0.0).\n"
@@ -715,7 +756,7 @@ class GroqScriptProvider(ScriptProvider):
             f"   - Naturally silent actions (e.g., seeds resting in soil, roots pushing downward underground, cell division, leaves gently unfolding) DO NOT generate audible impacts! Set sound_type='none' and sfx_query=null for naturally silent biological growth.\n"
             f"   - STRICTLY FORBIDDEN: Do NOT invent dramatic cracking, explosions, crunching, or fictional sci-fi sounds for silent biological processes.\n"
             f"   - Use sound_type='ambience' only when an environmental background sound naturally accompanies the shot (e.g. soft rain falling, gentle wind rustle).\n"
-            f"4. 'shot_plan': For scenes containing multiple distinct physical actions, provide a sequential list of sub-scene camera shots (maximum 4 shots).\n"
+            f"6. 'shot_plan': For scenes containing multiple distinct physical actions, provide a sequential list of sub-scene camera shots (maximum 4 shots).\n"
             f"   SHOT PLANNING RULES:\n"
             f"   - SINGLE-ACTION SCENES: If the scene narration describes only one observable physical action or continuous state, set \"shot_plan\": null (or omit it). Do NOT split a single continuous action into redundant shots.\n"
             f"   - MULTI-ACTION SCENES: If the narration contains two distinct sequential physical actions (e.g., \"Pour oil into the hot pan, then add sliced carrots\"), create 2 shots. If it contains three distinct observable actions and duration permits, create 3 shots.\n"
@@ -747,6 +788,7 @@ class GroqScriptProvider(ScriptProvider):
             f"Do NOT write any introductory remarks, notes, or explanations before or after the JSON. Return ONLY a valid JSON object starting with '{{' and ending with '}}' matching one of these structures:\n\n"
             f"Multi-action scene example (2 distinct actions):\n"
             f"{{\n"
+            f"  \"primary_subject\": \"cooking oil in pan\",\n"
             f"  \"visual_prompt\": \"Cinematic macro close-up of cooking oil poured into a hot pan, followed by crisp sliced carrots added to sizzle.\",\n"
             f"  \"search_keywords\": [\"pouring oil pan\", \"cooking carrots wok\", \"vegetable stir fry skillet\"],\n"
             f"  \"action_timeline\": [\n"
@@ -806,6 +848,7 @@ class GroqScriptProvider(ScriptProvider):
             f"}}\n\n"
             f"Single-action scene example:\n"
             f"{{\n"
+            f"  \"primary_subject\": \"simmering water in kettle\",\n"
             f"  \"visual_prompt\": \"Cinematic macro close-up of water simmering in a stainless steel kettle\",\n"
             f"  \"search_keywords\": [\"water simmering kettle\", \"boiling water steam close up\"],\n"
             f"  \"action_timeline\": [\n"

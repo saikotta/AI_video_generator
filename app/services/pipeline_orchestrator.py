@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import uuid
 import inspect
@@ -21,7 +22,8 @@ from app.models.scene_asset import SceneAsset
 from app.models.pipeline_job import PipelineJob
 
 from app.schemas.media import MediaAssetSchema
-from app.schemas.visual_spec import validate_action_timeline_timing, reconcile_shot_plan_timing
+from app.schemas.visual_spec import validate_action_timeline_timing, reconcile_shot_plan_timing, PLACEHOLDER_SETTING
+from app.services.info_card import render_info_card
 from app.services.providers.base import ScriptProvider
 from app.services.providers.exceptions import (
     StockMediaError,
@@ -57,6 +59,69 @@ PROTECTED_REFERENCE_MEDIA = frozenset({
     "output_5scenesTEMP_MPY_wvf_snd.mp4",
     "full_render_audio.wav"
 })
+
+
+def extract_scene_subject(
+    scene_dict: Dict[str, Any],
+    fallback_topic: Optional[str] = None
+) -> str:
+    """
+    Extract a scene-specific primary subject rather than using the broad global topic name.
+    Priority:
+    1. 'primary_subject' explicitly provided in scene_dict (from visual specification).
+    2. 'primary_subject' from the first shot in shot_plan, if present.
+    3. Concrete subject extracted from visual_prompt or scene_text.
+    4. First specific search keyword from search_keywords.
+    5. Cleaned fallback noun phrase from topic.
+    """
+    # 1. Direct explicit scene-level primary_subject
+    if scene_dict.get("primary_subject") and str(scene_dict["primary_subject"]).strip():
+        return str(scene_dict["primary_subject"]).strip()
+
+    # 2. Check shot_plan if present
+    sp = scene_dict.get("shot_plan")
+    if isinstance(sp, list) and len(sp) > 0:
+        first_shot = sp[0]
+        if isinstance(first_shot, dict) and first_shot.get("primary_subject"):
+            return str(first_shot["primary_subject"]).strip()
+        elif hasattr(first_shot, "primary_subject") and first_shot.primary_subject:
+            return str(first_shot.primary_subject).strip()
+
+    # 3. Extract from visual_prompt or scene_text
+    prompt = str(scene_dict.get("visual_prompt") or scene_dict.get("scene_text") or "").strip()
+    if prompt:
+        m = re.search(
+            r'(?:close-up|macro shot|shot|view|timelapse|photo|cinematic macro shot|extreme close-up|cinematic shot)\s+of\s+(?:a|an|the)?\s*([^,\.]+?)(?:\s+(?:resting|in|as|with|pushing|falling|sizzling|growing|emerging|on|into|breaking|swelling)|\.|,)',
+            prompt,
+            re.IGNORECASE
+        )
+        if m:
+            extracted = m.group(1).strip()
+            if len(extracted) >= 3 and len(extracted.split()) <= 4:
+                return extracted
+
+        m2 = re.search(r'^(?:a|an|the)?\s*([a-z\s]{3,30}?)\s+(?:enters|absorbs|grows|pushes|emerges|swells|awakens|sizzles|pours|simmers)', prompt, re.IGNORECASE)
+        if m2:
+            extracted = m2.group(1).strip()
+            if len(extracted) >= 3:
+                return extracted
+
+    # 4. First search keyword if meaningful
+    kws = scene_dict.get("search_keywords") or []
+    if kws and isinstance(kws, list) and len(kws) > 0:
+        first_kw = str(kws[0]).strip()
+        kw_words = [w for w in re.split(r'\W+', first_kw) if len(w) > 2 and w.lower() not in ("macro", "close", "timelapse", "video", "shot")]
+        if kw_words:
+            candidate_subject = " ".join(kw_words[:2])
+            if len(candidate_subject) >= 3:
+                return candidate_subject
+
+    # 5. Cleaned topic fallback
+    if fallback_topic and str(fallback_topic).strip():
+        cleaned_top = re.sub(r'^(how\s+(?:a|to|an)?|the\s+|why\s+)', '', str(fallback_topic).strip(), flags=re.IGNORECASE).strip()
+        return cleaned_top if cleaned_top else "subject"
+
+    return "subject"
 
 
 class VideoPipelineOrchestrator:
@@ -640,7 +705,10 @@ class VideoPipelineOrchestrator:
             raise
 
     async def _stage_3_generate_visual_specs(
-        self, project_id: uuid.UUID, scenes: List[Dict[str, Any]]
+        self,
+        project_id: uuid.UUID,
+        scenes: List[Dict[str, Any]],
+        topic: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Stage 3: Generate visual prompts and stock search keywords via parallel fan-out."""
         job_id = await self._record_pipeline_job(
@@ -660,7 +728,10 @@ class VideoPipelineOrchestrator:
             provider = self.get_script_provider()
             # Bounded parallel execution reusing existing orchestrator function
             specs = await process_visual_specifications_parallel(
-                provider=provider, scenes=scenes, max_concurrency=settings.GROQ_MAX_CONCURRENCY
+                provider=provider,
+                scenes=scenes,
+                max_concurrency=settings.GROQ_MAX_CONCURRENCY,
+                topic=topic,
             )
 
             for sc, sp in zip(scenes, specs):
@@ -853,14 +924,15 @@ class VideoPipelineOrchestrator:
 
                 shot_plan = sc.get("shot_plan")
                 if not shot_plan:
+                    scene_subject = extract_scene_subject(sc, fallback_topic=topic)
                     shot_plan = [{
                         "shot_index": 1,
                         "provisional_start_seconds": 0.0,
                         "provisional_end_seconds": dur,
                         "required_visible_action": sc.get("visual_prompt") or sc.get("scene_text") or "cinematic scene",
-                        "primary_subject": topic or "subject",
+                        "primary_subject": scene_subject,
                         "search_keywords": kw_list,
-                        "required_setting": "appropriate setting",
+                        "required_setting": sc.get("required_setting") or "appropriate setting",
                     }]
 
                 if shot_plan:
@@ -910,7 +982,10 @@ class VideoPipelineOrchestrator:
                             "visual_prompt": r_shot.get("required_visible_action", ""),
                             "required_action": r_shot.get("required_visible_action", ""),
                             "primary_subject": r_shot.get("primary_subject", ""),
-                            "required_setting": r_shot.get("required_setting", ""),
+                            "required_setting": (
+                                "" if r_shot.get("required_setting") == PLACEHOLDER_SETTING
+                                else r_shot.get("required_setting", "")
+                            ),
                             "visual_state": r_shot.get("visual_state", ""),
                             "camera_framing": r_shot.get("camera_framing", ""),
                             "required_objects": r_shot.get("required_objects") or [],
@@ -950,12 +1025,22 @@ class VideoPipelineOrchestrator:
 
                         try:
                             if verified_cand is None:
+                                # Determine rejected candidate IDs for this shot from registry and exclude upfront
+                                rejected_for_shot = reg.get("rejected_candidates", {}).get(shot_key, [])
+                                shot_excluded_ids = set(used_video_ids)
+                                for r_id in rejected_for_shot:
+                                    try:
+                                        shot_excluded_ids.add(int(r_id))
+                                    except (ValueError, TypeError):
+                                        pass
+                                    shot_excluded_ids.add(str(r_id))
+
                                 # 1. Retrieve bounded pool of candidate clips (up to 3)
                                 if hasattr(video_provider, "search_media_candidates"):
                                     candidates = await video_provider.search_media_candidates(
                                         s_keywords,
                                         target_duration=s_dur,
-                                        used_video_ids=used_video_ids,
+                                        used_video_ids=shot_excluded_ids,
                                         scene_context=shot_ctx,
                                         max_candidates=3
                                     )
@@ -963,7 +1048,7 @@ class VideoPipelineOrchestrator:
                                     single_m = await video_provider.search_media(
                                         s_keywords,
                                         target_duration=s_dur,
-                                        used_video_ids=used_video_ids,
+                                        used_video_ids=shot_excluded_ids,
                                         scene_context=shot_ctx
                                     )
                                     candidates = [single_m]
@@ -972,6 +1057,7 @@ class VideoPipelineOrchestrator:
                                     raise NoSuitableMediaFoundError(f"No candidate video clips returned for shot {s_idx}.")
 
                                 # 2. Actual Video-Frame Verification Loop
+                                best_uncertain = None
                                 for cand in candidates:
                                     p_id = cand.metadata.get("pexels_id")
 
@@ -1055,6 +1141,9 @@ class VideoPipelineOrchestrator:
                                             f"Candidate {p_id} for Scene {order} Shot {s_idx} is UNCERTAIN: "
                                             f"contact sheet saved to {cs_path}. Awaiting manual approval."
                                         )
+                                        _score = float((cand.metadata or {}).get("semantic_score", 0.0) or 0.0)
+                                        if best_uncertain is None or _score > best_uncertain[3]:
+                                            best_uncertain = (cand, cand_f, current_vres, _score)
                                     else:
                                         logger.warning(
                                             f"Candidate {p_id} for Scene {order} Shot {s_idx} REJECTED: {'; '.join(current_vres.contradictions)}"
@@ -1066,8 +1155,85 @@ class VideoPipelineOrchestrator:
                                                 pass
 
                                 # CRITICAL ACCURACY RULE:
-                                # Never automatically treat UNCERTAIN or MANUAL_REVIEW_REQUIRED as verified!
-                                # Unapproved uncertain footage is NEVER sent to final assembly.
+                                # UNCERTAIN or MANUAL_REVIEW_REQUIRED footage is never treated as verified.
+                                # With UNCERTAIN_FOOTAGE_POLICY="block" (default) it is never sent to final
+                                # assembly. With "best_effort" the best unverified clip MAY be assembled,
+                                # but it is explicitly flagged unverified (unverified_best_effort=True,
+                                # is_visual_frame_verified=False) and stays in the pending-review registry.
+                                if (
+                                    verified_cand is None
+                                    and best_uncertain is not None
+                                    and str(settings.UNCERTAIN_FOOTAGE_POLICY).strip().lower() == "best_effort"
+                                    and ConceptClassifier.classify_feasibility(shot_ctx.get("required_action", ""), shot_ctx.get("primary_subject", ""), shot_ctx.get("visual_prompt", ""))[0] != ConceptFeasibility.CONCEPTUAL_ABSTRACT
+                                ):
+                                    verified_cand, verified_file, v_res, _ = best_uncertain
+                                    v_res.is_visual_frame_verified = False
+                                    v_res.evidence.append(
+                                        "BEST-EFFORT: no clip was verified; this UNVERIFIED clip was used "
+                                        "because UNCERTAIN_FOOTAGE_POLICY=best_effort. Not approved."
+                                    )
+                                    used_video_ids.add(verified_cand.metadata.get("pexels_id"))
+                                    logger.warning(
+                                        f"Scene {order} Shot {s_idx}: no verified clip; using best UNVERIFIED candidate "
+                                        f"{verified_cand.metadata.get('pexels_id')} (UNCERTAIN_FOOTAGE_POLICY=best_effort). "
+                                        f"It is recorded as uncertain in the scene metadata and in the approval registry."
+                                    )
+
+                                pending_shot_reviews = [
+                                    pr for pr in self.get_pending_approvals(project_id)
+                                    if pr.get("shot_key") == f"scene_{order}_shot_{s_idx}"
+                                ]
+                                if verified_cand is None and settings.ABSTRACT_SHOT_CARD_ENABLED and not pending_shot_reviews:
+                                    _feas, _feas_msg = ConceptClassifier.classify_feasibility(
+                                        shot_ctx.get("required_action", ""),
+                                        shot_ctx.get("primary_subject", ""),
+                                        shot_ctx.get("visual_prompt", ""),
+                                    )
+                                    if _feas == ConceptFeasibility.CONCEPTUAL_ABSTRACT:
+                                        # Stock footage cannot show this truthfully: render an honest title card
+                                        card_path = os.path.join(clips_dir, f"scene_{order}_shot_{s_idx}_card.mp4")
+                                        render_info_card(
+                                            heading=sc.get("scene_text", "") or str(shot_ctx.get("primary_subject", "")),
+                                            out_path=card_path,
+                                            duration_seconds=float(r_shot["duration_seconds"]) + 1.0,
+                                        )
+                                        sc["requires_animation"] = True
+                                        sc["recommended_strategy"] = "diagram_or_motion_graphic"
+                                        sc["feasibility_reason"] = _feas_msg
+                                        card_meta = {
+                                            "shot_index": s_idx,
+                                            "allocated_frames": r_shot["allocated_frames"],
+                                            "start_frame": r_shot["start_frame"],
+                                            "end_frame": r_shot["end_frame"],
+                                            "start_seconds": r_shot["start_seconds"],
+                                            "end_seconds": r_shot["end_seconds"],
+                                            "duration_seconds": r_shot["duration_seconds"],
+                                            "required_visible_action": r_shot.get("required_visible_action"),
+                                            "primary_subject": r_shot.get("primary_subject"),
+                                            "verification_status": "not_applicable_generated_card",
+                                            "is_visual_frame_verified": False,
+                                            "unverified_best_effort": False,
+                                            "generated_info_card": True,
+                                            "feasibility_reason": _feas_msg,
+                                            "recommended_strategy": "diagram_or_motion_graphic",
+                                        }
+                                        await self._save_scene_asset(
+                                            scene_id=sc["id"],
+                                            asset_type=AssetType.VIDEO,
+                                            provider_name="generated_card",
+                                            local_path=card_path,
+                                            source_url=None,
+                                            duration_seconds=s_dur,
+                                            metadata=card_meta,
+                                        )
+                                        shot_clips.append(card_path)
+                                        shot_metadata_list.append(card_meta)
+                                        logger.warning(
+                                            f"Scene {order} Shot {s_idx}: abstract process ({_feas_msg}); "
+                                            f"rendered a title card instead of unrelated stock footage."
+                                        )
+                                        continue
+
                                 if verified_cand is None:
                                     pending_shot_reviews = [
                                         pr for pr in self.get_pending_approvals(project_id)
@@ -1083,10 +1249,14 @@ class VideoPipelineOrchestrator:
 
                                     feas, feas_msg = ConceptClassifier.classify_feasibility(
                                         shot_ctx.get("required_action", ""),
-                                        shot_ctx.get("primary_subject", "")
+                                        shot_ctx.get("primary_subject", ""),
+                                        shot_ctx.get("visual_prompt", "")
                                     )
                                     reason_str = f"All candidate clips failed visual verification for shot {s_idx} ('{r_shot.get('required_visible_action')}')"
                                     if feas == ConceptFeasibility.CONCEPTUAL_ABSTRACT:
+                                        sc["requires_animation"] = True
+                                        sc["recommended_strategy"] = "diagram_or_motion_graphic"
+                                        sc["feasibility_reason"] = feas_msg
                                         reason_str += f" ({feas_msg})"
                                     raise NoSuitableMediaFoundError(reason_str)
 
@@ -1116,6 +1286,7 @@ class VideoPipelineOrchestrator:
                                 "verification_evidence": v_res.evidence,
                                 "evaluated_timestamps": v_res.evaluated_timestamps,
                                 "is_visual_frame_verified": v_res.is_visual_frame_verified,
+                                "unverified_best_effort": v_res.status != VerificationStatus.ACCEPTED,
                                 "recommended_strategy": v_res.recommended_strategy
                             }
                             await self._save_scene_asset(
@@ -1695,7 +1866,7 @@ class VideoPipelineOrchestrator:
                 scenes = await self._stage_2_split_scenes(project_id, script, desired_duration)
 
                 # Stage 3: Visual Specifications (Parallel Groq Semaphore=5)
-                scenes = await self._stage_3_generate_visual_specs(project_id, scenes)
+                scenes = await self._stage_3_generate_visual_specs(project_id, scenes, topic=topic)
 
                 # Stage 4: Voiceover Audio (EdgeTTS + PyAV)
                 scenes = await self._stage_4_generate_voiceover(project_id, scenes, workspace["audio_dir"])

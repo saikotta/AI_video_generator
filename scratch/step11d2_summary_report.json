@@ -1,0 +1,765 @@
+{
+  "project_id": "2143bbc8-8061-4639-b974-475f6071336d",
+  "topic": "How to prepare a simple vegetable stir-fry",
+  "requested_duration_seconds": 20,
+  "overall_status": "SUCCESS",
+  "pipeline_error": null,
+  "total_execution_time_seconds": 679.49,
+  "measured_narration_duration_total": 24.24,
+  "final_video_duration": 24.38,
+  "script_text": "Heat a wok over high flame, drizzle two teaspoons oil, swirl until shimmering. Add minced garlic and ginger, stir‑fry for ten seconds, then toss sliced carrots, bell peppers, broccoli florets, and snap peas, cooking briskly until crisp‑tender, splash soy sauce, finish with a pinch salt.",
+  "script_words": 45,
+  "stages_count": 7,
+  "stages_status": {
+    "script_generation": "completed",
+    "scene_splitting": "completed",
+    "visual_specification": "completed",
+    "voiceover_generation": "completed",
+    "media_sourcing": "completed",
+    "sfx_sourcing": "completed",
+    "video_assembly": "completed"
+  },
+  "stage_durations": {
+    "script_generation": 1.96,
+    "scene_splitting": 12.36,
+    "visual_specification": 89.5,
+    "voiceover_generation": 8.74,
+    "media_sourcing": 101.64,
+    "sfx_sourcing": 328.85,
+    "video_assembly": 136.38
+  },
+  "num_scenes": 5,
+  "total_planned_shots": 9,
+  "total_sourced_shots": 9,
+  "total_missing_shots": 0,
+  "scenes_detail": [
+    {
+      "scene_order": 1,
+      "scene_id": "9f9f31f4-5b80-49a9-b4ef-fa1c260a4eac",
+      "scene_text": "Heat a wok over high flame, drizzle two teaspoons oil,",
+      "duration_seconds": 4.416,
+      "visual_prompt": "Cinematic macro close-up of a wok heating over a high flame, then a precise drizzle of two teaspoons of oil into the sizzling pan.",
+      "search_keywords": [
+        "high flame wok",
+        "oil drizzle wok",
+        "macro wok heating",
+        "cooking oil pour"
+      ],
+      "planned_shots": [
+        {
+          "shot_index": 1,
+          "required_visible_action": "Wok heating over high flame",
+          "primary_subject": "Wok on burner",
+          "required_setting": "Stovetop with high flame",
+          "visual_state": "metal glowing, flame licking sides",
+          "camera_framing": "macro close-up",
+          "search_keywords": [
+            "high flame wok",
+            "macro wok heating",
+            "stovetop flame closeup"
+          ],
+          "provisional_start_seconds": 0.0,
+          "provisional_end_seconds": 2.2,
+          "expected_duration": 2.2,
+          "action_event_index": 0
+        },
+        {
+          "shot_index": 2,
+          "required_visible_action": "Drizzling two teaspoons oil into hot wok",
+          "primary_subject": "Oil stream",
+          "required_setting": "Stovetop wok",
+          "visual_state": "oil shimmering as it contacts hot surface",
+          "camera_framing": "close-up",
+          "search_keywords": [
+            "oil drizzle wok",
+            "cooking oil pour",
+            "macro oil pour"
+          ],
+          "provisional_start_seconds": 2.2,
+          "provisional_end_seconds": 4.6,
+          "expected_duration": 2.4,
+          "action_event_index": 1
+        }
+      ],
+      "action_timeline": [
+        {
+          "action_description": "Wok heating over high flame",
+          "visual_start_seconds": 0.0,
+          "visual_end_seconds": 2.2,
+          "sfx_query": "high flame cooking",
+          "sfx_start_seconds": 0.0,
+          "sfx_duration_seconds": 2.2,
+          "sfx_volume": 0.3,
+          "sound_type": "ambience"
+        },
+        {
+          "action_description": "Drizzling two teaspoons oil into hot wok",
+          "visual_start_seconds": 2.2,
+          "visual_end_seconds": 4.6,
+          "sfx_query": "oil hitting hot wok",
+          "sfx_start_seconds": 2.3,
+          "sfx_duration_seconds": 1.0,
+          "sfx_volume": 0.35,
+          "sound_type": "action"
+        }
+      ]
+    },
+    {
+      "scene_order": 2,
+      "scene_id": "504aa279-1968-4b44-a1c3-9c41d191830c",
+      "scene_text": "swirl until shimmering. Add minced garlic and ginger,",
+      "duration_seconds": 5.088,
+      "visual_prompt": "Macro close-up of a wooden spoon swirling a glossy sauce in a hot pan until it shimmers, then a hand sprinkling minced garlic and ginger into the pan.",
+      "search_keywords": [
+        "sauce swirling pan",
+        "macro cooking sauce",
+        "adding garlic ginger",
+        "close up stir pan",
+        "shimmering sauce"
+      ],
+      "planned_shots": [
+        {
+          "shot_index": 1,
+          "required_visible_action": "Swirling sauce with spoon",
+          "primary_subject": "Wooden spoon and glossy sauce",
+          "required_setting": "Stovetop pan on burner",
+          "visual_state": "sauce shimmering",
+          "camera_framing": "macro close-up",
+          "search_keywords": [
+            "sauce swirling pan",
+            "macro cooking sauce",
+            "spoon stir pan"
+          ],
+          "provisional_start_seconds": 0.0,
+          "provisional_end_seconds": 1.8,
+          "expected_duration": 1.8,
+          "action_event_index": 0
+        },
+        {
+          "shot_index": 2,
+          "required_visible_action": "Adding minced garlic and ginger",
+          "primary_subject": "Minced garlic and ginger pieces",
+          "required_setting": "Stovetop pan with shimmering sauce",
+          "visual_state": "raw herbs falling into sauce",
+          "camera_framing": "close-up",
+          "search_keywords": [
+            "adding garlic ginger",
+            "minced garlic pan",
+            "herbs falling pan"
+          ],
+          "provisional_start_seconds": 1.8,
+          "provisional_end_seconds": 3.7,
+          "expected_duration": 1.9,
+          "action_event_index": 1
+        }
+      ],
+      "action_timeline": [
+        {
+          "action_description": "Wooden spoon swirling glossy sauce in hot pan",
+          "visual_start_seconds": 0.0,
+          "visual_end_seconds": 1.8,
+          "sfx_query": "spoon stirring sauce",
+          "sfx_start_seconds": 0.2,
+          "sfx_duration_seconds": 1.2,
+          "sfx_volume": 0.3,
+          "sound_type": "action"
+        },
+        {
+          "action_description": "Hand sprinkling minced garlic and ginger into the sauce",
+          "visual_start_seconds": 1.8,
+          "visual_end_seconds": 3.7,
+          "sfx_query": "garlic ginger hitting pan",
+          "sfx_start_seconds": 1.9,
+          "sfx_duration_seconds": 1.0,
+          "sfx_volume": 0.35,
+          "sound_type": "action"
+        }
+      ]
+    },
+    {
+      "scene_order": 3,
+      "scene_id": "c2c07f3a-ddf8-4f0d-9682-5e4b60375aa4",
+      "scene_text": "stir‑fry for ten seconds, then toss sliced carrots, bell peppers,",
+      "duration_seconds": 5.424,
+      "visual_prompt": "Macro close-up of a hot wok being continuously stirred, then a hand quickly tosses sliced carrots and bell peppers into the sizzling wok.",
+      "search_keywords": [
+        "stir fry wok",
+        "toss carrots peppers",
+        "macro wok cooking",
+        "sizzling oil wok",
+        "close up stir fry"
+      ],
+      "planned_shots": [
+        {
+          "shot_index": 1,
+          "required_visible_action": "Continuous stirring of sizzling wok",
+          "primary_subject": "Wok with oil and vegetables",
+          "required_setting": "Stovetop wok on burner",
+          "visual_state": "sizzling, oil shimmering",
+          "camera_framing": "macro close-up",
+          "search_keywords": [
+            "stir fry wok",
+            "macro wok cooking",
+            "sizzling oil wok"
+          ],
+          "provisional_start_seconds": 0.0,
+          "provisional_end_seconds": 2.2,
+          "expected_duration": 2.2,
+          "action_event_index": 0
+        },
+        {
+          "shot_index": 2,
+          "required_visible_action": "Hand tossing sliced carrots and bell peppers into wok",
+          "primary_subject": "Sliced carrots and bell peppers",
+          "required_setting": "Stovetop wok on burner",
+          "visual_state": "raw vegetables entering sizzling oil",
+          "camera_framing": "close-up",
+          "search_keywords": [
+            "toss carrots peppers",
+            "adding vegetables wok",
+            "close up stir fry"
+          ],
+          "provisional_start_seconds": 2.2,
+          "provisional_end_seconds": 4.6,
+          "expected_duration": 2.4,
+          "action_event_index": 1
+        }
+      ],
+      "action_timeline": [
+        {
+          "action_description": "Continuous stirring of sizzling wok",
+          "visual_start_seconds": 0.0,
+          "visual_end_seconds": 2.2,
+          "sfx_query": "stirring sizzling pan",
+          "sfx_start_seconds": 0.2,
+          "sfx_duration_seconds": 2.0,
+          "sfx_volume": 0.4,
+          "sound_type": "action"
+        },
+        {
+          "action_description": "Tossing sliced carrots and bell peppers into wok",
+          "visual_start_seconds": 2.2,
+          "visual_end_seconds": 4.6,
+          "sfx_query": "vegetables hitting hot pan",
+          "sfx_start_seconds": 2.3,
+          "sfx_duration_seconds": 1.0,
+          "sfx_volume": 0.45,
+          "sound_type": "action"
+        }
+      ]
+    },
+    {
+      "scene_order": 4,
+      "scene_id": "3bbdf2c4-99f4-44ea-8225-7ac17c911986",
+      "scene_text": "broccoli florets, and snap peas, cooking briskly until crisp‑tender,",
+      "duration_seconds": 5.376,
+      "visual_prompt": "Macro close-up of broccoli florets and snap peas being tossed briskly in a hot stainless-steel skillet over a flame, steam rising as the vegetables sizzle.",
+      "search_keywords": [
+        "broccoli snap peas stir",
+        "macro vegetable sauté",
+        "close up skillet vegetables",
+        "steam sizzling pan"
+      ],
+      "planned_shots": [],
+      "action_timeline": [
+        {
+          "action_description": "Tossing broccoli florets and snap peas in a hot skillet",
+          "visual_start_seconds": 0.0,
+          "visual_end_seconds": 4.2,
+          "sfx_query": "vegetables sizzling in pan",
+          "sfx_start_seconds": 0.2,
+          "sfx_duration_seconds": 4.0,
+          "sfx_volume": 0.4,
+          "sound_type": "action"
+        }
+      ]
+    },
+    {
+      "scene_order": 5,
+      "scene_id": "4960db07-bd07-4025-9c16-fa012283fee9",
+      "scene_text": "splash soy sauce, finish with a pinch salt.",
+      "duration_seconds": 3.936,
+      "visual_prompt": "Macro close-up of soy sauce splashing onto a plate, followed by a hand pinching and sprinkling a pinch of salt over the sauce.",
+      "search_keywords": [
+        "soy sauce splash",
+        "macro soy sauce",
+        "pinch salt sprinkle",
+        "close up salt"
+      ],
+      "planned_shots": [
+        {
+          "shot_index": 1,
+          "required_visible_action": "Soy sauce splashing onto plate",
+          "primary_subject": "Soy sauce droplets",
+          "required_setting": "White ceramic plate on kitchen countertop",
+          "visual_state": "dry plate before splash",
+          "camera_framing": "macro close-up",
+          "search_keywords": [
+            "soy sauce splash",
+            "macro soy sauce"
+          ],
+          "provisional_start_seconds": 0.0,
+          "provisional_end_seconds": 2.0,
+          "expected_duration": 2.0,
+          "action_event_index": 0
+        },
+        {
+          "shot_index": 2,
+          "required_visible_action": "Pinching and sprinkling salt onto sauce",
+          "primary_subject": "Hand with pinch of salt",
+          "required_setting": "Same plate with soy sauce on kitchen countertop",
+          "visual_state": "plate with sauce receiving salt",
+          "camera_framing": "macro close-up",
+          "search_keywords": [
+            "pinch salt sprinkle",
+            "close up salt"
+          ],
+          "provisional_start_seconds": 2.0,
+          "provisional_end_seconds": 3.7,
+          "expected_duration": 1.7,
+          "action_event_index": 1
+        }
+      ],
+      "action_timeline": [
+        {
+          "action_description": "Soy sauce being splashed onto the plate",
+          "visual_start_seconds": 0.0,
+          "visual_end_seconds": 2.0,
+          "sfx_query": "liquid splash sound",
+          "sfx_start_seconds": 0.2,
+          "sfx_duration_seconds": 0.8,
+          "sfx_volume": 0.4,
+          "sound_type": "action"
+        },
+        {
+          "action_description": "Hand pinching and sprinkling a pinch of salt onto the sauce",
+          "visual_start_seconds": 2.0,
+          "visual_end_seconds": 3.7,
+          "sfx_query": "salt grains sprinkling",
+          "sfx_start_seconds": 2.1,
+          "sfx_duration_seconds": 0.6,
+          "sfx_volume": 0.3,
+          "sound_type": "action"
+        }
+      ]
+    }
+  ],
+  "video_assets": [
+    {
+      "scene_id": "9f9f31f4-5b80-49a9-b4ef-fa1c260a4eac",
+      "provider": "pexels",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\clips\\scene_1_shot_1_2894881.mp4",
+      "source_url": "https://www.pexels.com/video/deep-frying-a-crab-on-a-wok-in-high-fire-2894881/",
+      "pexels_id": 2894881,
+      "score": 75.0,
+      "semantic_score": 30.0,
+      "technical_score": 45.0,
+      "semantic_reasons": [
+        "subjects: ['high', 'wok']",
+        "scene setting alignment: wok (+10.0)"
+      ],
+      "photographer": "K",
+      "shot_metadata": [],
+      "media_paths": [
+        "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\clips\\scene_1_shot_1_2894881.mp4"
+      ],
+      "visual_coverage_complete": true,
+      "fallbacks_used": []
+    },
+    {
+      "scene_id": "9f9f31f4-5b80-49a9-b4ef-fa1c260a4eac",
+      "provider": "pexels",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\clips\\scene_1_shot_2_4912636.mp4",
+      "source_url": "https://www.pexels.com/video/person-pouring-an-olive-oil-in-the-frying-pan-4912636/",
+      "pexels_id": 4912636,
+      "score": 110.0,
+      "semantic_score": 65.0,
+      "technical_score": 45.0,
+      "semantic_reasons": [
+        "actions: ['frying', 'pouring']",
+        "subjects: ['oil']",
+        "settings: ['pan']",
+        "subject+action/setting co-occurrence"
+      ],
+      "photographer": "RDNE Stock project",
+      "shot_metadata": [],
+      "media_paths": [
+        "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\clips\\scene_1_shot_2_4912636.mp4"
+      ],
+      "visual_coverage_complete": true,
+      "fallbacks_used": []
+    },
+    {
+      "scene_id": "504aa279-1968-4b44-a1c3-9c41d191830c",
+      "provider": "pexels",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\clips\\scene_2_shot_1_10280237.mp4",
+      "source_url": "https://www.pexels.com/video/person-cooking-food-on-frying-pan-10280237/",
+      "pexels_id": 10280237,
+      "score": 110.0,
+      "semantic_score": 65.0,
+      "technical_score": 45.0,
+      "semantic_reasons": [
+        "actions: ['frying', 'cooking']",
+        "subjects: ['food']",
+        "settings: ['pan']",
+        "subject+action/setting co-occurrence",
+        "scene setting alignment: pan (+10.0)"
+      ],
+      "photographer": "khanhhoangminh",
+      "shot_metadata": [],
+      "media_paths": [
+        "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\clips\\scene_2_shot_1_10280237.mp4"
+      ],
+      "visual_coverage_complete": true,
+      "fallbacks_used": []
+    },
+    {
+      "scene_id": "504aa279-1968-4b44-a1c3-9c41d191830c",
+      "provider": "pexels",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\clips\\scene_2_shot_2_39877487.mp4",
+      "source_url": "https://www.pexels.com/video/chef-cooking-vegetables-in-kitchen-39877487/",
+      "pexels_id": 39877487,
+      "score": 105.0,
+      "semantic_score": 60.0,
+      "technical_score": 45.0,
+      "semantic_reasons": [
+        "actions: ['cooking']",
+        "subjects: ['vegetables', 'chef']",
+        "settings: ['kitchen']",
+        "subject+action/setting co-occurrence"
+      ],
+      "photographer": "Oğuzhan Kara",
+      "shot_metadata": [],
+      "media_paths": [
+        "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\clips\\scene_2_shot_2_39877487.mp4"
+      ],
+      "visual_coverage_complete": true,
+      "fallbacks_used": []
+    },
+    {
+      "scene_id": "c2c07f3a-ddf8-4f0d-9682-5e4b60375aa4",
+      "provider": "pexels",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\clips\\scene_3_shot_1_5793733.mp4",
+      "source_url": "https://www.pexels.com/video/person-cooking-meat-on-a-frying-pan-5793733/",
+      "pexels_id": 5793733,
+      "score": 110.0,
+      "semantic_score": 65.0,
+      "technical_score": 45.0,
+      "semantic_reasons": [
+        "actions: ['frying', 'cooking']",
+        "subjects: ['meat']",
+        "settings: ['pan']",
+        "subject+action/setting co-occurrence"
+      ],
+      "photographer": "Tima Miroshnichenko",
+      "shot_metadata": [],
+      "media_paths": [
+        "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\clips\\scene_3_shot_1_5793733.mp4"
+      ],
+      "visual_coverage_complete": true,
+      "fallbacks_used": []
+    },
+    {
+      "scene_id": "c2c07f3a-ddf8-4f0d-9682-5e4b60375aa4",
+      "provider": "pexels",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\clips\\scene_3_shot_2_7963455.mp4",
+      "source_url": "https://www.pexels.com/video/close-up-shot-of-cooking-vegetables-in-the-pan-7963455/",
+      "pexels_id": 7963455,
+      "score": 110.0,
+      "semantic_score": 65.0,
+      "technical_score": 45.0,
+      "semantic_reasons": [
+        "actions: ['cooking']",
+        "subjects: ['close', 'vegetables', 'up']",
+        "settings: ['pan']",
+        "subject+action/setting co-occurrence"
+      ],
+      "photographer": "Kampus Production",
+      "shot_metadata": [],
+      "media_paths": [
+        "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\clips\\scene_3_shot_2_7963455.mp4"
+      ],
+      "visual_coverage_complete": true,
+      "fallbacks_used": []
+    },
+    {
+      "scene_id": "3bbdf2c4-99f4-44ea-8225-7ac17c911986",
+      "provider": "pexels",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\clips\\scene_4_clip_10835096.mp4",
+      "source_url": "https://www.pexels.com/video/close-up-on-hand-cooking-asian-food-on-pan-10835096/",
+      "pexels_id": 10835096,
+      "score": 110.0,
+      "semantic_score": 65.0,
+      "technical_score": 45.0,
+      "semantic_reasons": [
+        "actions: ['cooking']",
+        "subjects: ['close', 'food', 'up']",
+        "settings: ['pan']",
+        "subject+action/setting co-occurrence",
+        "scene setting alignment: pan (+10.0)"
+      ],
+      "photographer": "Gilario Guevara",
+      "shot_metadata": [],
+      "media_paths": [
+        "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\clips\\scene_4_clip_10835096.mp4"
+      ],
+      "visual_coverage_complete": true,
+      "fallbacks_used": []
+    },
+    {
+      "scene_id": "4960db07-bd07-4025-9c16-fa012283fee9",
+      "provider": "pexels",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\clips\\scene_5_shot_1_8094317.mp4",
+      "source_url": "https://www.pexels.com/video/a-person-pouring-soy-sauce-8094317/",
+      "pexels_id": 8094317,
+      "score": 65.0,
+      "semantic_score": 20.0,
+      "technical_score": 45.0,
+      "semantic_reasons": [
+        "subjects: ['soy', 'sauce']"
+      ],
+      "photographer": "Mikhail Nilov",
+      "shot_metadata": [],
+      "media_paths": [
+        "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\clips\\scene_5_shot_1_8094317.mp4"
+      ],
+      "visual_coverage_complete": true,
+      "fallbacks_used": []
+    },
+    {
+      "scene_id": "4960db07-bd07-4025-9c16-fa012283fee9",
+      "provider": "pexels",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\clips\\scene_5_shot_2_6811249.mp4",
+      "source_url": "https://www.pexels.com/video/close-up-view-of-a-person-putting-bath-salt-in-a-bathtub-6811249/",
+      "pexels_id": 6811249,
+      "score": 75.0,
+      "semantic_score": 30.0,
+      "technical_score": 45.0,
+      "semantic_reasons": [
+        "subjects: ['up', 'salt', 'close']"
+      ],
+      "photographer": "Yaroslav Shuraev",
+      "shot_metadata": [],
+      "media_paths": [
+        "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\clips\\scene_5_shot_2_6811249.mp4"
+      ],
+      "visual_coverage_complete": true,
+      "fallbacks_used": []
+    }
+  ],
+  "sfx_assets": [
+    {
+      "scene_id": "9f9f31f4-5b80-49a9-b4ef-fa1c260a4eac",
+      "provider": "freesound",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\sounds\\scene_1_action_1_189623.mp3",
+      "freesound_id": 189623,
+      "sound_name": "Cooking on Gas.flac",
+      "license": "CC0 Public Domain",
+      "license_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+      "action_desc": "Wok heating over high flame",
+      "volume": 0.3,
+      "start_offset": 0.0,
+      "duration": 2.2
+    },
+    {
+      "scene_id": "9f9f31f4-5b80-49a9-b4ef-fa1c260a4eac",
+      "provider": "freesound",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\sounds\\scene_1_action_2_667699.mp3",
+      "freesound_id": 667699,
+      "sound_name": "Train moving slowly recorded near the rails with oil pump at a distance, rail grating squeaking and crashing, loud gust of wind recorded in Texas",
+      "license": "CC0 Public Domain",
+      "license_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+      "action_desc": "Drizzling two teaspoons oil into hot wok",
+      "volume": 0.35,
+      "start_offset": 2.3,
+      "duration": 1.0
+    },
+    {
+      "scene_id": "504aa279-1968-4b44-a1c3-9c41d191830c",
+      "provider": "freesound",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\sounds\\scene_2_action_1_638034.mp3",
+      "freesound_id": 638034,
+      "sound_name": "Fleshy Pasta Stirring Sounds",
+      "license": "CC0 Public Domain",
+      "license_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+      "action_desc": "Wooden spoon swirling glossy sauce in hot pan",
+      "volume": 0.3,
+      "start_offset": 0.2,
+      "duration": 1.2
+    },
+    {
+      "scene_id": "504aa279-1968-4b44-a1c3-9c41d191830c",
+      "provider": "freesound",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\sounds\\scene_2_action_2_641046.mp3",
+      "freesound_id": 641046,
+      "sound_name": "Gore Impact - \"LOT OF HEART\"",
+      "license": "CC0 Public Domain",
+      "license_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+      "action_desc": "Hand sprinkling minced garlic and ginger into the sauce",
+      "volume": 0.35,
+      "start_offset": 1.9,
+      "duration": 1.0
+    },
+    {
+      "scene_id": "c2c07f3a-ddf8-4f0d-9682-5e4b60375aa4",
+      "provider": "freesound",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\sounds\\scene_3_action_1_871871.mp3",
+      "freesound_id": 871871,
+      "sound_name": "frying pan open stirring closing Shakshouka",
+      "license": "CC0 Public Domain",
+      "license_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+      "action_desc": "Continuous stirring of sizzling wok",
+      "volume": 0.4,
+      "start_offset": 0.2,
+      "duration": 2.0
+    },
+    {
+      "scene_id": "c2c07f3a-ddf8-4f0d-9682-5e4b60375aa4",
+      "provider": "freesound",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\sounds\\scene_3_action_2_659930.mp3",
+      "freesound_id": 659930,
+      "sound_name": "Human being hit -body hit.OWI.wav",
+      "license": "CC0 Public Domain",
+      "license_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+      "action_desc": "Tossing sliced carrots and bell peppers into wok",
+      "volume": 0.45,
+      "start_offset": 2.3,
+      "duration": 1.0
+    },
+    {
+      "scene_id": "3bbdf2c4-99f4-44ea-8225-7ac17c911986",
+      "provider": "freesound",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\sounds\\scene_4_action_1_871870.mp3",
+      "freesound_id": 871870,
+      "sound_name": "frying pan open Shakshouka",
+      "license": "CC0 Public Domain",
+      "license_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+      "action_desc": "Tossing broccoli florets and snap peas in a hot skillet",
+      "volume": 0.4,
+      "start_offset": 0.2,
+      "duration": 4.0
+    },
+    {
+      "scene_id": "4960db07-bd07-4025-9c16-fa012283fee9",
+      "provider": "freesound",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\sounds\\scene_5_action_2_684134.mp3",
+      "freesound_id": 684134,
+      "sound_name": "2023-04-14 02.40.40 sal mundi.flac",
+      "license": "CC0 Public Domain",
+      "license_url": "http://creativecommons.org/publicdomain/zero/1.0/",
+      "action_desc": "Hand pinching and sprinkling a pinch of salt onto the sauce",
+      "volume": 0.3,
+      "start_offset": 2.1,
+      "duration": 0.6
+    }
+  ],
+  "voiceover_assets": [
+    {
+      "scene_id": "9f9f31f4-5b80-49a9-b4ef-fa1c260a4eac",
+      "provider": "edge_tts",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\audio\\scene_1_narr.mp3",
+      "duration": 4.416
+    },
+    {
+      "scene_id": "504aa279-1968-4b44-a1c3-9c41d191830c",
+      "provider": "edge_tts",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\audio\\scene_2_narr.mp3",
+      "duration": 5.088
+    },
+    {
+      "scene_id": "c2c07f3a-ddf8-4f0d-9682-5e4b60375aa4",
+      "provider": "edge_tts",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\audio\\scene_3_narr.mp3",
+      "duration": 5.424
+    },
+    {
+      "scene_id": "3bbdf2c4-99f4-44ea-8225-7ac17c911986",
+      "provider": "edge_tts",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\audio\\scene_4_narr.mp3",
+      "duration": 5.376
+    },
+    {
+      "scene_id": "4960db07-bd07-4025-9c16-fa012283fee9",
+      "provider": "edge_tts",
+      "local_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\audio\\scene_5_narr.mp3",
+      "duration": 3.936
+    }
+  ],
+  "final_video_path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\video_2143bbc8-8061-4639-b974-475f6071336d.mp4",
+  "video_metadata": {
+    "file_size_bytes": 13331414,
+    "file_size_mb": 12.71,
+    "width": 1280,
+    "height": 720,
+    "resolution": "1280x720",
+    "fps": 24.0,
+    "duration_seconds": 24.38,
+    "total_decoded_frames": 585,
+    "black_frame_count": 0,
+    "video_codec": "h264",
+    "audio_stream_present": true,
+    "audio_analysis": {
+      "sample_rate": 44100,
+      "channels": 2,
+      "codec": "aac",
+      "total_samples": 1075200,
+      "peak_min": 0,
+      "peak_max": 0,
+      "rms": 0.1,
+      "hard_clipped": false
+    }
+  },
+  "extracted_keyframes": [
+    {
+      "scene_order": 1,
+      "shot_index": 1,
+      "global_frame": 53,
+      "local_frame": 53,
+      "path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\keyframes\\scene_1_single_frame_53.jpg",
+      "action": "Cinematic macro close-up of a wok heating over a high flame, then a precise drizzle of two teaspoons of oil into the sizzling pan.",
+      "pexels_id": 2894881,
+      "mean_luminance": 26.4
+    },
+    {
+      "scene_order": 2,
+      "shot_index": 1,
+      "global_frame": 167,
+      "local_frame": 61,
+      "path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\keyframes\\scene_2_single_frame_167.jpg",
+      "action": "Macro close-up of a wooden spoon swirling a glossy sauce in a hot pan until it shimmers, then a hand sprinkling minced garlic and ginger into the pan.",
+      "pexels_id": 10280237,
+      "mean_luminance": 29.1
+    },
+    {
+      "scene_order": 3,
+      "shot_index": 1,
+      "global_frame": 293,
+      "local_frame": 65,
+      "path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\keyframes\\scene_3_single_frame_293.jpg",
+      "action": "Macro close-up of a hot wok being continuously stirred, then a hand quickly tosses sliced carrots and bell peppers into the sizzling wok.",
+      "pexels_id": 5793733,
+      "mean_luminance": 27.2
+    },
+    {
+      "scene_order": 4,
+      "shot_index": 1,
+      "global_frame": 422,
+      "local_frame": 64,
+      "path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\keyframes\\scene_4_single_frame_422.jpg",
+      "action": "Macro close-up of broccoli florets and snap peas being tossed briskly in a hot stainless-steel skillet over a flame, steam rising as the vegetables sizzle.",
+      "pexels_id": 10835096,
+      "mean_luminance": 56.5
+    },
+    {
+      "scene_order": 5,
+      "shot_index": 1,
+      "global_frame": 534,
+      "local_frame": 47,
+      "path": "C:\\AiVideoGenerator\\media\\projects\\2143bbc8-8061-4639-b974-475f6071336d\\keyframes\\scene_5_single_frame_534.jpg",
+      "action": "Macro close-up of soy sauce splashing onto a plate, followed by a hand pinching and sprinkling a pinch of salt over the sauce.",
+      "pexels_id": 8094317,
+      "mean_luminance": 47.9
+    }
+  ],
+  "reference_media_hashes_match": true
+}
