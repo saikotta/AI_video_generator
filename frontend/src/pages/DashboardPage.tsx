@@ -48,7 +48,11 @@ export default function DashboardPage({ user, onLogout }: Props) {
   activeProjectIdRef.current = activeProjectId
 
   const refreshProjects = useCallback(async () => {
-    try { setProjects(await listProjects(0, 100)) }
+    try {
+      const items = await listProjects(0, 100)
+      setProjects(items)
+      setError('')
+    }
     catch { setError('Could not load your projects. Please refresh and try again.') }
     finally { setLoadingProjects(false) }
   }, [])

@@ -1,3 +1,4 @@
+from typing import Optional
 from uuid import UUID
 from datetime import datetime
 from pydantic import BaseModel, EmailStr, ConfigDict
@@ -20,3 +21,6 @@ class UserResponse(BaseModel):
 
 class MessageResponse(BaseModel):
     message: str
+    token: Optional[str] = None
+    access_token: Optional[str] = None
+    token_type: Optional[str] = None

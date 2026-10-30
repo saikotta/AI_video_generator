@@ -51,7 +51,12 @@ async def login(user_data: UserLogin, response: Response, db: AsyncSession = Dep
         secure=False,  # Allowed for local HTTP testing
         max_age=1440 * 60
     )
-    return MessageResponse(message="Login successful")
+    return MessageResponse(
+        message="Login successful",
+        token=token,
+        access_token=token,
+        token_type="bearer"
+    )
 
 @router.get("/me", response_model=UserResponse)
 async def get_me(request: Request, db: AsyncSession = Depends(get_db)):

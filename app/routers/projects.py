@@ -49,6 +49,7 @@ async def _run_pipeline_background(project_id: uuid.UUID, resume: bool = False) 
         logger.error(f"Background pipeline failed for project {project_id}: {e}")
 
 
+@router.post("", response_model=ProjectResponse, status_code=status.HTTP_202_ACCEPTED, include_in_schema=False)
 @router.post("/", response_model=ProjectResponse, status_code=status.HTTP_202_ACCEPTED)
 async def create_project(
     req: ProjectCreateRequest,
@@ -96,20 +97,23 @@ async def create_project(
     return project
 
 
+@router.get("", response_model=ProjectListResponse, include_in_schema=False)
 @router.get("/", response_model=ProjectListResponse)
 async def list_projects(
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    skip: Optional[int] = Query(None, ge=0),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Lists all video projects belonging to the authenticated user."""
+    actual_offset = skip if skip is not None else offset
     stmt = (
         select(Project)
         .where(Project.user_id == current_user.id)
         .order_by(Project.created_at.desc())
         .limit(limit)
-        .offset(offset)
+        .offset(actual_offset)
     )
     result = await db.execute(stmt)
     projects = list(result.scalars().all())
@@ -121,6 +125,7 @@ async def list_projects(
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
+@router.get("/{project_id}/status", response_model=ProjectResponse, include_in_schema=False)
 async def get_project(
     project_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
@@ -219,6 +224,7 @@ async def get_project_report(
 
 
 @router.get("/{project_id}/video")
+@router.get("/{project_id}/download", include_in_schema=False)
 async def get_project_video(
     project_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
